@@ -12,7 +12,7 @@
     button,input{font:inherit}button:focus-visible{outline:3px solid rgba(0,113,227,.22);outline-offset:2px}input:focus-visible{outline:0}
     .shell{width:min(1180px,calc(100% - 48px));margin:auto;padding:30px 0 40px}
     .titlebar{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;padding:4px 2px 22px}
-    h1{margin:0;font-size:25px;line-height:1.15;font-weight:650;letter-spacing:-.025em}.subtitle{margin:5px 0 0;color:var(--muted);font-size:13px}
+    h1{margin:0;font-size:25px;line-height:1.15;font-weight:650;letter-spacing:-.025em}.subtitle{display:flex;align-items:center;gap:8px;margin:5px 0 0;color:var(--muted);font-size:13px}.demo-badge{padding:1px 6px;border:1px solid #dedee1;border-radius:999px;color:#77777c;background:#fafafa;font-size:9px;letter-spacing:.04em}
     .dot{position:relative;width:7px;height:7px;flex:none;border-radius:50%}.dot.normal{color:var(--green);background:var(--green)}.dot.warning{color:var(--amber);background:var(--amber)}.dot.offline{color:var(--red);background:var(--red)}
     .dot.pulse:after{content:"";position:absolute;inset:-4px;border:1px solid currentColor;border-radius:50%;animation:heartbeat 2.4s ease-out infinite}
     .machines{display:flex;align-items:flex-end;gap:2px;overflow-x:auto;scrollbar-width:none;border-bottom:1px solid var(--line)}.machines::-webkit-scrollbar{display:none}
@@ -38,7 +38,7 @@
 </head>
 <body>
   <main class="shell">
-    <header class="titlebar"><div><h1>进程监视器</h1><p class="subtitle">查看各台机器当前占用最高的进程</p></div></header>
+    <header class="titlebar"><div><h1>进程监视器</h1><p class="subtitle">查看各台机器当前占用最高的进程 <span class="demo-badge" id="demoBadge" hidden>模拟数据</span></p></div></header>
     <nav class="machines" id="machines" aria-label="选择机器" role="tablist"></nav>
     <section class="statusline" aria-live="polite"><span id="hostEndpoint">—</span></section>
     <div class="toolbar"><div class="segments" role="tablist" aria-label="资源类型"><button class="segment active" data-view="cpu" role="tab">CPU</button><button class="segment" data-view="memory" role="tab">内存</button><button class="segment" data-view="disk" role="tab">硬盘</button></div><div class="sort-hint">点击表头可排序</div></div>
@@ -53,6 +53,98 @@
   <div class="hover-hint" id="hoverHint" role="tooltip"></div>
   <script>
     const $=s=>document.querySelector(s),esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+    const standaloneDemo=location.protocol==="file:";
+    if(standaloneDemo)$("#demoBadge").hidden=false;
+    const demoStore={
+      hosts:[
+        {id:"demo-local",name:"开发机",address:"127.0.0.1",port:22,local:true},
+        {id:"demo-edge",name:"边缘节点",address:"10.0.8.21",user:"monitor",port:22,local:false},
+        {id:"demo-db",name:"数据库",address:"10.0.8.35",user:"monitor",port:22,local:false}
+      ],
+      ticks:new Map(),snapshots:new Map(),terminated:new Set(),cleared:new Set()
+    };
+    const demoProcessSeed=[
+      ["code","demo","launchd",1,47.8,8.4,24],
+      ["python3","demo","code",101,31.6,5.9,12],
+      ["node","demo","code",101,22.3,4.7,18],
+      ["postgres","postgres","systemd",1,15.1,11.8,14],
+      ["chrome","demo","launchd",1,10.7,7.3,42],
+      ["dockerd","root","systemd",1,7.9,3.6,31],
+      ["nginx","www-data","systemd",1,4.2,1.4,6],
+      ["redis-server","redis","systemd",1,2.8,2.7,5],
+      ["sshd","root","systemd",1,.6,.3,2]
+    ];
+    const demoDirectoryTree={
+      "/":[["home",78e9],["var",36e9],["opt",14e9],["usr",11e9]],
+      "/home":[["demo",61e9],["shared",17e9]],
+      "/home/demo":[["projects",34e9],["Downloads",15e9],[".cache",8e9],["Documents",4e9]],
+      "/home/demo/projects":[["monitor",13e9],["website",11e9],["archives",7e9],["lab",3e9]],
+      "/home/demo/projects/monitor":[["node_modules",6.4e9],["logs",3.6e9],["build",3e9]],
+      "/var":[["lib",22e9],["log",9e9],["cache",5e9]],
+      "/data":[["backups",94e9],["media",63e9],["exports",27e9]],
+      "/data/backups":[["daily",51e9],["weekly",29e9],["monthly",14e9]]
+    };
+    function demoSnapshot(hostId){
+      const hostIndex=Math.max(0,demoStore.hosts.findIndex(host=>host.id===hostId)),tick=(demoStore.ticks.get(hostId)||0)+1;
+      demoStore.ticks.set(hostId,tick);
+      const processes=demoProcessSeed.map((seed,index)=>{
+        const [name,user,parent,ppid,cpu,memory,threads]=seed,pid=1100+hostIndex*1000+index*17;
+        const drift=Math.sin(tick*.72+index*1.31+hostIndex)*2.2;
+        return {pid,ppid,name,parent_name:parent,user,threads,cpu:Number(Math.max(.1,cpu+drift+hostIndex*1.7).toFixed(1)),memory:Number(Math.max(.1,memory+drift*.12).toFixed(1)),rss_bytes:Math.round(Math.max(.1,memory+drift*.12)*310*1024*1024),started:`Jul 28 ${String(9+index%8).padStart(2,"0")}:${String(index*5).padStart(2,"0")}:00`};
+      }).filter(process=>!demoStore.terminated.has(`${hostId}:${process.pid}`));
+      const totalRoot=256e9,totalData=1e12,usedRoot=(.36+hostIndex*.08)*totalRoot,usedData=(.31+hostIndex*.05)*totalData;
+      const snapshot={
+        processes,
+        filesystems:[
+          {device:"/dev/vda1",type:"ext4",total_bytes:totalRoot,used_bytes:usedRoot,available_bytes:totalRoot-usedRoot,used_percent:Number((usedRoot/totalRoot*100).toFixed(1)),mount:"/"},
+          {device:"/dev/vdb1",type:"xfs",total_bytes:totalData,used_bytes:usedData,available_bytes:totalData-usedData,used_percent:Number((usedData/totalData*100).toFixed(1)),mount:"/data"}
+        ],
+        home_path:"/home/demo",
+        summary:{cpu_percent:Number((processes.reduce((sum,process)=>sum+process.cpu,0)/16).toFixed(1)),memory_percent:Number((54+hostIndex*7+Math.sin(tick)*1.3).toFixed(1)),load_1:Number((1.82+hostIndex*.71+Math.sin(tick*.4)*.2).toFixed(2)),load_5:Number((1.61+hostIndex*.62).toFixed(2)),cores:16,process_count:processes.length},
+        updated_at:Date.now()
+      };
+      demoStore.snapshots.set(hostId,snapshot);
+      return snapshot;
+    }
+    function demoCurrentSnapshot(hostId){return demoStore.snapshots.get(hostId)||demoSnapshot(hostId)}
+    function demoHostInfo(host,snapshot=demoCurrentSnapshot(host.id)){return {...host,home_path:snapshot.home_path,status:"normal",collection_status:"normal",connectivity_status:"normal",updated_at:snapshot.updated_at}}
+    function demoDirectory(hostId,mount,path){
+      const snapshot=demoCurrentSnapshot(hostId),filesystem=snapshot.filesystems.find(item=>item.mount===mount),total=filesystem?.total_bytes||1;
+      const parentDepth=path===mount?0:path.slice(mount.length).split("/").filter(Boolean).length;
+      const children=(demoDirectoryTree[path]||[]).map(([name,rawSize])=>{
+        const childPath=`${path.replace(/\/$/,"")}/${name}`||`/${name}`,size=demoStore.cleared.has(`${hostId}:${childPath}`)?0:rawSize,depth=parentDepth+1;
+        return {name,path:childPath,size_bytes:size,depth,percent:Number((size/total*100).toFixed(1)),can_delete:depth>=3,delete_min_depth:3};
+      }).sort((a,b)=>b.size_bytes-a.size_bytes||a.name.localeCompare(b.name));
+      return {host_id:hostId,mount,path,depth:parentDepth,delete_enabled:true,delete_min_depth:3,children};
+    }
+    function demoChangeResult(host){
+      const snapshot=demoSnapshot(host.id);
+      return {id:host.id,name:host.name,status:"normal",host:demoHostInfo(host,snapshot),snapshot};
+    }
+    async function demoApi(path,options={}){
+      await wait(45);
+      const url=new URL(path,"http://monitor.demo"),method=(options.method||"GET").toUpperCase(),parts=url.pathname.split("/").filter(Boolean);
+      let body={};
+      try{body=typeof options.body==="string"?JSON.parse(options.body):options.body||{}}catch{}
+      if(method==="GET"&&url.pathname==="/api/hosts")return {hosts:demoStore.hosts.map(host=>demoHostInfo(host))};
+      if(method==="GET"&&url.pathname==="/api/host-statuses")return {statuses:demoStore.hosts.map(host=>({id:host.id,status:"normal",checked_at:Date.now(),checking:false}))};
+      if(method==="POST"&&url.pathname==="/api/hosts/test")return {ok:true,elapsed_ms:38};
+      if(method==="POST"&&url.pathname==="/api/hosts"){
+        const host={id:`demo-${Date.now()}`,name:body.name,address:body.address,user:body.user||"",port:Number(body.port)||22,local:false};
+        demoStore.hosts.push(host);
+        return demoChangeResult(host);
+      }
+      const hostId=decodeURIComponent(parts[2]||""),host=demoStore.hosts.find(item=>item.id===hostId);
+      if(!host)throw new Error("机器不存在");
+      if(method==="PATCH"&&parts.length===3){Object.assign(host,{name:body.name,address:body.address,user:body.user||"",port:Number(body.port)||22});return demoChangeResult(host)}
+      if(method==="DELETE"&&parts.length===3){demoStore.hosts=demoStore.hosts.filter(item=>item.id!==hostId);demoStore.snapshots.delete(hostId);return {ok:true}}
+      if(method==="GET"&&parts[3]==="snapshot"){const snapshot=demoSnapshot(hostId);return {host:demoHostInfo(host,snapshot),status:"normal",snapshot}}
+      if(method==="GET"&&parts[3]==="filesystems"){const snapshot=demoCurrentSnapshot(hostId);return {host_id:hostId,filesystems:snapshot.filesystems,updated_at:snapshot.updated_at}}
+      if(method==="GET"&&parts[3]==="directories")return demoDirectory(hostId,url.searchParams.get("mount")||"/",url.searchParams.get("path")||"/");
+      if(method==="POST"&&parts[3]==="directories"&&parts[4]==="clear"){demoStore.cleared.add(`${hostId}:${body.path}`);return {ok:true,path:body.path}}
+      if(method==="POST"&&parts[3]==="processes"&&parts[5]==="terminate"){demoStore.terminated.add(`${hostId}:${Number(parts[4])}`);demoSnapshot(hostId);return {ok:true}}
+      throw new Error(`模拟接口不存在：${method} ${url.pathname}`);
+    }
     const state={hosts:[],hostId:null,lastHostId:null,view:"cpu",viewByHost:{},sortKey:"metric",sortDir:"desc",rows:[],summary:{},updatedAt:0,cache:{},diskTree:new Map(),removedHostIds:new Set(),pendingKills:new Set(),pending:null,pendingDirectory:null,manageId:null,refreshCount:0,requestToken:0,deleteHintShown:false};
     const frame=$("#frame"),machines=$("#machines"),killDialog=$("#killDialog"),clearDialog=$("#clearDialog"),hostDialog=$("#hostDialog"),deleteDialog=$("#deleteDialog");
     const bytes=(n,compact=false)=>{if(!Number.isFinite(Number(n)))return "—";let value=Number(n),unit="B";for(const u of ["KB","MB","GB","TB"]){if(value<1024)break;value/=1024;unit=u}return `${value.toFixed(value>=100||compact?0:1)} ${unit}`};
@@ -60,11 +152,11 @@
     const pulsingClock=t=>{const parts=clock(t).split(":");if(parts.length!==3)return clock(t);return `${parts[0]}<span class="time-colon" aria-hidden="true">:</span>${parts[1]}<span class="time-colon" aria-hidden="true">:</span>${parts[2]}`};
     const isLoopback=address=>/^(127(?:\.\d+){3}|localhost|::1|\[::1\])$/i.test(address||"");
     const endpoint=(address,port)=>address?.includes(":")?`[${address.replace(/^\[|\]$/g,"")}]:${port}`:`${address}:${port}`;
-    const displayAddress=host=>host?.tunnel_peer||host?.local?host?.tunnel_peer||location.hostname:isLoopback(host?.address)?endpoint(host.address,host.port):host?.address||"";
+    const displayAddress=host=>host?.tunnel_peer||host?.local?host?.tunnel_peer||location.hostname||(standaloneDemo?"本机预览":""):isLoopback(host?.address)?endpoint(host.address,host.port):host?.address||"";
     const addressLabel=host=>host?.tunnel_peer?"公网地址":host?.local?"访问地址":isLoopback(host?.address)?"隧道端点":"SSH 地址";
     const activeHost=()=>state.hosts.find(h=>h.id===state.hostId);
     function defaultSort(){state.sortKey="metric";state.sortDir="desc"}
-    async function api(path,options={}){const response=await fetch(path,{cache:"no-store",headers:{"Content-Type":"application/json"},...options});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.error||`请求失败（${response.status}）`);return data}
+    async function api(path,options={}){if(standaloneDemo)return demoApi(path,options);const response=await fetch(path,{cache:"no-store",headers:{"Content-Type":"application/json"},...options});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.error||`请求失败（${response.status}）`);return data}
     const connectivityLabels={normal:"SSH 连接正常",warning:"SSH 状态检测中",offline:"SSH 连接异常"},collectionLabels={normal:"资源采集成功",warning:"尚未采集资源",offline:"资源采集失败"};
     function renderTabs(){machines.innerHTML=state.hosts.map(h=>{const status=h.connectivity_status||"warning";return `<button class="machine ${h.id===state.hostId?"active":""}" data-host="${esc(h.id)}" role="tab" aria-selected="${h.id===state.hostId}"><span class="dot ${status} pulse connectivity-dot" role="img" aria-label="${connectivityLabels[status]||connectivityLabels.warning}"></span><span>${esc(h.name)}</span><span class="rename" data-manage="${esc(h.id)}" role="button" aria-label="编辑 ${esc(h.name)}" title="编辑机器">✎</span></button>`}).join("")+`<button class="machine-add" data-add aria-label="添加机器" title="添加机器">＋</button>`}
     function updateConnectivityDots(){for(const host of state.hosts){const dot=machines.querySelector(`[data-host="${CSS.escape(host.id)}"] .connectivity-dot`);if(!dot)continue;const status=host.connectivity_status||"warning";dot.className=`dot ${status} pulse connectivity-dot`;dot.setAttribute("aria-label",connectivityLabels[status]||connectivityLabels.warning)}}

@@ -23,6 +23,8 @@ http://127.0.0.1:8080
 
 演示模式提供四台模拟机器、进程变化、硬盘目录树、终止与清空操作，不访问真实服务器。
 
+如果只想查看页面，不启动 Python，可以直接用浏览器打开 [`doc/index.html`](doc/index.html)。页面检测到 `file://` 后会自动启用内置模拟数据，提供三台机器、动态进程、磁盘目录树及常用交互；这些变化只保存在当前浏览器页面内。通过 HTTP 打开时不会启用这套数据。
+
 ## 2. 监控本机
 
 只读启动：
@@ -252,6 +254,14 @@ node tests/browser_test.mjs http://127.0.0.1:8765
 ```
 
 浏览器测试需要本机安装 Chromium 或 Chrome。
+
+独立页面冒烟检查：
+
+```bash
+chromium --headless=new --no-sandbox \
+  --virtual-time-budget=2500 \
+  --dump-dom "file://$(pwd)/doc/index.html"
+```
 
 ## 11. 当前实现文件
 

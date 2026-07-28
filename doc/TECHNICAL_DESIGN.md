@@ -435,6 +435,7 @@ kill -TERM -- <整数 PID>
 ## 13. 前端实现
 
 - 原生 HTML、CSS 和 JavaScript，无框架、构建工具或外部资源。
+- 通过 `file://` 直接打开时启用页面内存中的模拟 API，提供三台机器、动态进程、目录树和操作反馈；通过 HTTP/HTTPS 打开时只调用真实后端，不混入模拟数据。
 - 使用系统字体栈和 `font-variant-numeric: tabular-nums`。
 - 机器、资源、排序、目录和弹窗状态统一保存在一个页面级 `state` 对象中。
 - 每个机器 Tab 渲染 `connectivity_status`，浏览器每 30 秒读取 `/api/host-statuses` 后只更新状态点。
