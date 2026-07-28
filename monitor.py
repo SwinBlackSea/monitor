@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent
+INDEX_PATH = ROOT / "doc" / "index.html"
 DIRECTORY_CACHE_TTL = 600
 HOST_STATUS_INTERVAL = 30
 HOST_STATUS_STALE_AFTER = 75
@@ -121,20 +122,20 @@ DEMO_NAMES = [
 
 DEMO_DIRECTORY_TREE: dict[str, list[tuple[str, int]]] = {
     "/": [("home", 96_600_000_000), ("var", 41_200_000_000), ("opt", 18_400_000_000)],
-    "/home": [("devhost", 72_800_000_000), ("shared", 23_800_000_000)],
-    "/home/devhost": [
+    "/home": [("demo-user", 72_800_000_000), ("shared", 23_800_000_000)],
+    "/home/demo-user": [
         ("projects", 38_600_000_000), ("Library", 21_400_000_000),
         ("Downloads", 8_700_000_000), (".cache", 4_100_000_000),
     ],
-    "/home/devhost/projects": [
+    "/home/demo-user/projects": [
         ("monitor", 12_800_000_000), ("website", 9_400_000_000),
         ("archives", 7_600_000_000), ("playground", 3_900_000_000),
     ],
-    "/home/devhost/projects/monitor": [
+    "/home/demo-user/projects/monitor": [
         ("node_modules", 6_800_000_000), ("logs", 3_100_000_000),
         ("build", 2_900_000_000),
     ],
-    "/home/devhost/Library": [
+    "/home/demo-user/Library": [
         ("Caches", 11_900_000_000), ("Containers", 6_300_000_000),
         ("Application Support", 3_200_000_000),
     ],
@@ -163,7 +164,7 @@ def demo_snapshot(host_index: int, tick: int) -> dict[str, Any]:
     used = 52 + host_index * 7 + rng.uniform(-1, 1)
     return {
         "processes": processes,
-        "home_path": "/home/devhost",
+        "home_path": "/home/demo-user",
         "filesystems": [
             {"device": "/dev/vda1", "type": "ext4", "total_bytes": 256e9,
              "used_bytes": 256e9 * used / 100, "available_bytes": 256e9 * (1 - used / 100),
@@ -212,7 +213,12 @@ class MonitorApp:
         self.directory_generation: dict[str, int] = {}
         self.tunnel_peer_cache: dict[tuple[str, int], tuple[float, str | None]] = {}
         self.host_health: dict[str, dict[str, Any]] = {}
-        self.hosts_path = hosts_path or ROOT / "hosts.json"
+        default_hosts_path = (
+            ROOT / "hosts.local.json"
+            if (ROOT / "hosts.local.json").exists()
+            else ROOT / "hosts.json"
+        )
+        self.hosts_path = hosts_path or default_hosts_path
         self.hosts = self._load_hosts(self.hosts_path)
         self.data: dict[str, dict[str, Any]] = {}
         self.thread: threading.Thread | None = None
@@ -1210,7 +1216,7 @@ def make_handler(app: MonitorApp):
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
             if path in {"/", "/index.html"}:
-                body = (ROOT / "index.html").read_bytes()
+                body = INDEX_PATH.read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")

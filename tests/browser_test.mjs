@@ -171,27 +171,27 @@ try {
   await evaluate(`document.querySelector('[data-tree-toggle][data-path="/"]').click()`);
   await waitFor(`document.querySelector('[data-tree-toggle][data-path="/home"]')`, "展开挂载点一级目录");
   await evaluate(`document.querySelector('[data-tree-toggle][data-path="/home"]').click()`);
-  await waitFor(`document.querySelector('[data-tree-toggle][data-path="/home/devhost"]')`, "展开二级目录");
-  assert(await evaluate(`document.querySelector('[data-tree-toggle][data-path="/home/devhost"]').closest("tr").querySelector(".tree-title").textContent === "~/"`), "用户主目录缩写为 ~/");
-  await evaluate(`document.querySelector('[data-tree-toggle][data-path="/home/devhost"]').click()`);
-  await waitFor(`document.querySelector('[data-tree-toggle][data-path="/home/devhost/projects"]')`, "展开三级目录");
-  const levelThree = await evaluate(`(() => {const button=document.querySelector('.clear-dir[data-path="/home/devhost/projects"]');return {exists:Boolean(button),enabled:Boolean(button&&!button.disabled),depth:button?.closest("tr").dataset.depth,nativeTitle:button?.hasAttribute("title")}})()`);
+  await waitFor(`document.querySelector('[data-tree-toggle][data-path="/home/demo-user"]')`, "展开二级目录");
+  assert(await evaluate(`document.querySelector('[data-tree-toggle][data-path="/home/demo-user"]').closest("tr").querySelector(".tree-title").textContent === "~/"`), "用户主目录缩写为 ~/");
+  await evaluate(`document.querySelector('[data-tree-toggle][data-path="/home/demo-user"]').click()`);
+  await waitFor(`document.querySelector('[data-tree-toggle][data-path="/home/demo-user/projects"]')`, "展开三级目录");
+  const levelThree = await evaluate(`(() => {const button=document.querySelector('.clear-dir[data-path="/home/demo-user/projects"]');return {exists:Boolean(button),enabled:Boolean(button&&!button.disabled),depth:button?.closest("tr").dataset.depth,nativeTitle:button?.hasAttribute("title")}})()`);
   assert(levelThree.exists && levelThree.enabled && levelThree.depth === "3" && !levelThree.nativeTitle, "三级目录显示清空按钮且不使用重复触发的原生提示");
   assert(await evaluate(`(() => {const entry={loading:false,children:null,expanded:false},base={kind:"node",isMount:false,mount:"/",name:"target",path:"/one/two/three",size_bytes:1,percent:.1,total_bytes:100,entry,delete_min_depth:4};return !diskTreeRow({...base,depth:3,can_delete:false}).includes("clear-dir")&&diskTreeRow({...base,path:"/one/two/three/four",depth:4,can_delete:true}).includes("clear-dir")})()`), "--allow-delete N 同步控制前端从第 N 级显示清空按钮");
-  assert(await evaluate(`(() => {const button=document.querySelector('.clear-dir[data-path="/home/devhost/projects"]');button.setAttribute("aria-disabled","true");button.dataset.hint="使用 --allow-delete 3 启动后可清空";button.dispatchEvent(new MouseEvent("mouseover",{bubbles:true}));const shown=document.querySelector("#hoverHint").classList.contains("show")&&document.querySelector("#hoverHint").textContent.includes("--allow-delete 3");button.removeAttribute("aria-disabled");delete button.dataset.hint;hideHoverHint();return shown})()`), "禁用的目录清空按钮显示稳定的自定义悬浮说明");
-  await evaluate(`document.querySelector('[data-tree-toggle][data-path="/home/devhost/projects"]').click()`);
-  await waitFor(`document.querySelector('[data-tree-toggle][data-path="/home/devhost/projects/monitor"]')`, "三级目录可继续展开");
+  assert(await evaluate(`(() => {const button=document.querySelector('.clear-dir[data-path="/home/demo-user/projects"]');button.setAttribute("aria-disabled","true");button.dataset.hint="使用 --allow-delete 3 启动后可清空";button.dispatchEvent(new MouseEvent("mouseover",{bubbles:true}));const shown=document.querySelector("#hoverHint").classList.contains("show")&&document.querySelector("#hoverHint").textContent.includes("--allow-delete 3");button.removeAttribute("aria-disabled");delete button.dataset.hint;hideHoverHint();return shown})()`), "禁用的目录清空按钮显示稳定的自定义悬浮说明");
+  await evaluate(`document.querySelector('[data-tree-toggle][data-path="/home/demo-user/projects"]').click()`);
+  await waitFor(`document.querySelector('[data-tree-toggle][data-path="/home/demo-user/projects/monitor"]')`, "三级目录可继续展开");
   await evaluate(`document.querySelector('[data-tree-toggle][data-path="/home"]').click();document.querySelector('[data-tree-toggle][data-path="/home"]').click()`);
-  assert(await evaluate(`Boolean(document.querySelector('[data-tree-toggle][data-path="/home/devhost"]')) && !document.querySelector('[data-tree-toggle][data-path="/home/devhost/projects"]')`), "收起父目录会递归收起全部子树");
-  await evaluate(`document.querySelector('[data-tree-toggle][data-path="/home/devhost"]').click();document.querySelector('[data-tree-toggle][data-path="/home/devhost/projects"]').click()`);
-  await waitFor(`document.querySelector('[data-tree-toggle][data-path="/home/devhost/projects/monitor"]')`, "递归收起后可逐层重新展开");
+  assert(await evaluate(`Boolean(document.querySelector('[data-tree-toggle][data-path="/home/demo-user"]')) && !document.querySelector('[data-tree-toggle][data-path="/home/demo-user/projects"]')`), "收起父目录会递归收起全部子树");
+  await evaluate(`document.querySelector('[data-tree-toggle][data-path="/home/demo-user"]').click();document.querySelector('[data-tree-toggle][data-path="/home/demo-user/projects"]').click()`);
+  await waitFor(`document.querySelector('[data-tree-toggle][data-path="/home/demo-user/projects/monitor"]')`, "递归收起后可逐层重新展开");
   if (process.env.MONITOR_TREE_SCREENSHOT) {
     await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
     await sleep(150);
     const treeShot = await send("Page.captureScreenshot", { format: "png", fromSurface: true });
     await writeFile(process.env.MONITOR_TREE_SCREENSHOT, Buffer.from(treeShot.data, "base64"));
   }
-  await evaluate(`document.querySelector('.clear-dir[data-path="/home/devhost/projects"]').click()`);
+  await evaluate(`document.querySelector('.clear-dir[data-path="/home/demo-user/projects"]').click()`);
   const clearConfirmation = await evaluate(`document.querySelector("#clearText").textContent`);
   assert(clearConfirmation.includes("目录本身会保留") && clearConfirmation.includes("无法撤销"), "清空确认明确保留目录且不可撤销");
   if (process.env.MONITOR_SCREENSHOT) {
@@ -199,9 +199,9 @@ try {
     await writeFile(process.env.MONITOR_SCREENSHOT, Buffer.from(shot.data, "base64"));
   }
   await evaluate(`document.querySelector("#confirmClear").click()`);
-  await waitFor(`document.querySelector('[data-tree-toggle][data-path="/home/devhost/projects"]') && document.querySelector('.clear-dir[data-path="/home/devhost/projects"]').closest("tr").querySelector(".tree-size").textContent.includes("0 B")`, "清空后目录保留且占用归零");
-  await evaluate(`document.querySelector('[data-tree-toggle][data-path="/home/devhost/projects"]').click()`);
-  await waitFor(`document.querySelector('[data-tree-toggle][data-path="/home/devhost/projects"]').disabled`, "已清空目录展开后显示为空");
+  await waitFor(`document.querySelector('[data-tree-toggle][data-path="/home/demo-user/projects"]') && document.querySelector('.clear-dir[data-path="/home/demo-user/projects"]').closest("tr").querySelector(".tree-size").textContent.includes("0 B")`, "清空后目录保留且占用归零");
+  await evaluate(`document.querySelector('[data-tree-toggle][data-path="/home/demo-user/projects"]').click()`);
+  await waitFor(`document.querySelector('[data-tree-toggle][data-path="/home/demo-user/projects"]').disabled`, "已清空目录展开后显示为空");
 
   await evaluate(`document.querySelector('[data-view="cpu"]').click()`);
   await waitFor(`document.querySelector('[data-view="cpu"]').classList.contains("active")`, "返回 CPU 页");
@@ -232,7 +232,7 @@ try {
   await evaluate(`window.__baseFetch=window.fetch;window.__delayedHostList=false;window.fetch=(...args)=>{const method=args[1]?.method||"GET";if(String(args[0])==="/api/hosts"&&method==="GET"&&!window.__delayedHostList){window.__delayedHostList=true;return window.__baseFetch(...args).then(response=>new Promise(resolve=>setTimeout(()=>resolve(response),2000)))}return window.__baseFetch(...args)};refresh({animate:false,refreshHosts:true})`);
   await sleep(100);
   const addStarted = Date.now();
-  await evaluate(`document.querySelector("#hostName").value="11"; document.querySelector("#hostAddress").value="127.0.0.1"; document.querySelector("#hostUser").value="devhost"; document.querySelector("#hostPort").value="2222"; document.querySelector("#saveHost").click()`);
+  await evaluate(`document.querySelector("#hostName").value="11"; document.querySelector("#hostAddress").value="127.0.0.1"; document.querySelector("#hostUser").value="demo-user"; document.querySelector("#hostPort").value="2222"; document.querySelector("#saveHost").click()`);
   await waitFor(`document.querySelector(".machine.active")?.textContent.includes("11") && document.querySelectorAll("tbody tr").length > 0`, "新增后立即切换并显示快照", 900);
   assert(Date.now() - addStarted < 900, "新增机器不等待进行中的旧刷新");
   await evaluate(`window.fetch=window.__baseFetch`);

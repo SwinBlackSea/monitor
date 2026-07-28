@@ -4,14 +4,14 @@ Python 标准库后端、原生 HTML/CSS/JavaScript 前端、系统 SSH、零数
 
 正式文档只有三份：
 
-- 产品行为：[`../prd/PRD.md`](../prd/PRD.md)
-- 技术实现：[`../prd/TECHNICAL_DESIGN.md`](../prd/TECHNICAL_DESIGN.md)
+- 产品行为：[`doc/PRD.md`](doc/PRD.md)
+- 技术实现：[`doc/TECHNICAL_DESIGN.md`](doc/TECHNICAL_DESIGN.md)
 - 启动运维：本 README
 
 ## 1. 快速体验
 
 ```bash
-cd /home/ubuntu/Developer/monitor/monitor
+cd /home/ubuntu/Developer/monitor
 python3 monitor.py --demo --allow-kill --allow-delete 3
 ```
 
@@ -98,7 +98,7 @@ http://127.0.0.1:9500
 - SSH 用户
 - SSH 端口
 
-“测试连接”只验证，不保存；“保存”会在最终验证成功后写入 `hosts.json`。
+“测试连接”只验证，不保存；“保存”会在最终验证成功后写入当前使用的机器配置文件。
 
 运行 `monitor.py` 的系统账户必须可以免交互登录目标机：
 
@@ -108,12 +108,15 @@ ssh -o BatchMode=yes -p 22 user@server true
 
 网页不接收 SSH 密码或私钥。请提前配置 SSH Key 和目标机的 `authorized_keys`。
 
-也可以复制并编辑示例配置：
+仓库中的 `hosts.json` 是不含真实服务器信息的安全默认配置。首次部署建议复制为只在本机保存、已被 Git 忽略的配置：
 
 ```bash
-cp hosts.example.json hosts.json
-python3 monitor.py --hosts hosts.json
+cp hosts.json hosts.local.json
+# 编辑 hosts.local.json 后启动
+python3 monitor.py
 ```
+
+程序会优先读取同目录 `hosts.local.json`，不存在时再读取提交到 Git 的 `hosts.json`。也可以用 `--hosts` 显式指定其他路径。
 
 机器配置修改后无需重启；`monitor.py` 自身代码修改后需要重启服务。
 
@@ -129,9 +132,9 @@ python3 monitor.py --hosts hosts.json
 
 ```json
 {
-  "name": "22服务器",
+  "name": "隧道服务器",
   "address": "127.0.0.1",
-  "user": "devhost",
+  "user": "your-user",
   "port": 2222,
   "local": false
 }
@@ -159,7 +162,7 @@ sudo -n ss -H -tnp state established
 - 切回来先立即展示缓存，再刷新当前机器。
 - 硬盘页面没有 5 秒刷新，只在点击目录时查询。
 - 后端目录结果缓存 10 分钟；浏览器已经展开的数据继续保留。
-- 服务重启后快照缓存清空，`hosts.json` 机器配置保留。
+- 服务重启后快照缓存清空，当前使用的机器配置文件保留。
 
 采集周期可调整，最小 1 秒：
 
@@ -177,7 +180,7 @@ python3 monitor.py --interval=5
 | `--bind` | `127.0.0.1` | HTTP 监听地址 |
 | `--port` | `8080` | HTTP 端口，合法范围 1–65535 |
 | `--interval` | `5` | CPU/内存采集周期秒数 |
-| `--hosts` | 同目录 `hosts.json` | 机器配置文件 |
+| `--hosts` | 优先 `hosts.local.json`，否则 `hosts.json` | 显式指定机器配置文件 |
 | `--username` | 环境变量 | Web Basic Auth 用户名 |
 | `--password` | 环境变量 | Web Basic Auth 密码 |
 
@@ -253,10 +256,12 @@ node tests/browser_test.mjs http://127.0.0.1:8765
 ## 11. 当前实现文件
 
 ```text
-index.html              当前 Web 页面
-monitor.py              后端、采集、缓存和 API
-hosts.example.json      机器配置示例
-hosts.json              当前机器配置
-tests/test_monitor.py   Python 后端测试
-tests/browser_test.mjs  Chromium 端到端测试
+monitor.py                  后端、采集、缓存和 API
+hosts.json                  可提交的脱敏默认配置
+hosts.local.json            当前机器私有配置（Git 忽略）
+doc/index.html              当前 Web 页面
+doc/PRD.md                  产品说明书
+doc/TECHNICAL_DESIGN.md     技术方案
+tests/test_monitor.py       Python 后端测试
+tests/browser_test.mjs      Chromium 端到端测试
 ```

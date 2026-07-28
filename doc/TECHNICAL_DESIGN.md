@@ -22,22 +22,20 @@
 ## 2. 目录结构
 
 ```text
-prd/
+README.md
+monitor.py
+hosts.json                 # 可提交的脱敏默认配置
+hosts.local.json           # 可选，本机真实配置，Git 忽略
+doc/
 ├── PRD.md
-└── TECHNICAL_DESIGN.md
-
-monitor/
-├── README.md
-├── index.html
-├── monitor.py
-├── hosts.example.json
-├── hosts.json
-└── tests/
-    ├── test_monitor.py
-    └── browser_test.mjs
+├── TECHNICAL_DESIGN.md
+└── index.html
+tests/
+├── test_monitor.py
+└── browser_test.mjs
 ```
 
-`PRD.md`、`TECHNICAL_DESIGN.md` 和 `README.md` 是仅有的三份长期维护文档。HTML/PDF 如需交付，应由 Markdown 临时导出，不作为独立信息源。
+`PRD.md`、`TECHNICAL_DESIGN.md` 和 `README.md` 是仅有的三份长期维护说明文档；`doc/index.html` 是服务直接加载的 Web 页面。其他 HTML/PDF 如需交付，应由 Markdown 临时导出，不作为独立信息源。
 
 ## 3. 总体架构
 
@@ -48,7 +46,7 @@ monitor/
 monitor.py
 ├── ThreadingHTTPServer
 ├── Basic Authentication
-├── hosts.json 原子持久化
+├── 当前机器配置文件原子持久化
 ├── 每机最新快照内存字典
 ├── 每机 SSH 健康状态内存字典
 ├── 目录 KV 缓存与后台任务
@@ -66,7 +64,7 @@ monitor.py
 ### 4.1 启动
 
 1. 解析命令行参数和认证环境变量。
-2. 从指定 `--hosts` 路径或同目录 `hosts.json` 加载机器配置；不存在时创建“本机”默认配置。
+2. 优先从指定 `--hosts` 路径加载机器配置；未指定时优先读取同目录、被 Git 忽略的 `hosts.local.json`，不存在时读取已脱敏的 `hosts.json`。
 3. 启动维护线程，只负责清理过期目录缓存和隧道地址缓存。
 4. 启动 SSH 健康线程，立即对全部机器执行一次轻量连通检查。
 5. 启动 `ThreadingHTTPServer`。
@@ -152,7 +150,7 @@ CPU 和内存共享同一快照，因此切换时先同步渲染缓存，不等�
 
 ### 5.3 持久化
 
-- 保存时先写 `hosts.json.tmp`，再以原子替换更新 `hosts.json`。
+- 保存时先写当前配置文件对应的 `.tmp` 临时文件，再以原子替换更新当前配置文件。
 - 写入失败时恢复内存中的旧配置。
 - 测试连接接口不写文件。
 - 删除机器同时删除其快照、目录缓存和目录任务。
@@ -406,7 +404,7 @@ kill -TERM -- <整数 PID>
 
 | 方法 | 路径 | 行为 |
 |---|---|---|
-| `GET` | `/`、`/index.html` | 返回单文件前端 |
+| `GET` | `/`、`/index.html` | 返回 `doc/index.html` 单文件前端 |
 | `GET` | `/api/health` | 返回运行状态、周期和危险功能开关 |
 | `GET` | `/api/hosts` | 返回机器元数据和已有缓存状态，不触发全机采集 |
 | `GET` | `/api/host-statuses` | 返回全部机器的轻量 SSH 状态缓存、30 秒周期和 75 秒有效期，不触发 SSH |
@@ -498,7 +496,7 @@ kill -TERM -- <整数 PID>
 
 | 数据 | 位置 | 生命周期 |
 |---|---|---|
-| 机器配置 | `hosts.json` | 持久化，原子更新 |
+| 机器配置 | `--hosts` 指定文件，或优先 `hosts.local.json`、其次 `hosts.json` | 持久化，原子更新 |
 | 每机最新快照 | Python 内存 | 删除机器或进程重启 |
 | 每机 SSH 健康状态 | Python KV 内存 | 持续覆盖；75 秒未更新对外变黄；删除机器或进程重启时清除 |
 | 目录结果 | Python KV 内存 | 10 分钟或主动失效 |
@@ -521,7 +519,7 @@ Caddy / Nginx / VPN
 monitor.py
 ```
 
-长期运行建议交给 systemd；临时验证可以直接在终端运行。完整命令见 `../monitor/README.md`。
+长期运行建议交给 systemd；临时验证可以直接在终端运行。完整命令见 `../README.md`。
 
 ## 18. 测试与质量门槛
 

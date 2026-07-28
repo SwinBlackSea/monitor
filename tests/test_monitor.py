@@ -77,7 +77,7 @@ class ApiTests(unittest.TestCase):
         self.assertGreater(len(payload["processes"]), 5)
         self.assertIn("parent_name", payload["processes"][0])
         _, selected = self.request("/api/hosts/demo-1/snapshot")
-        self.assertEqual(selected["host"]["home_path"], "/home/devhost")
+        self.assertEqual(selected["host"]["home_path"], "/home/demo-user")
 
     def test_rename(self):
         _, data = self.request("/api/hosts/demo-2", "PATCH", {"name": "应用服务器"})
@@ -152,18 +152,18 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(root["children"][0]["path"], "/home")
         _, level_two = self.request(
-            "/api/hosts/demo-1/directories?mount=%2F&path=%2Fhome%2Fdevhost"
+            "/api/hosts/demo-1/directories?mount=%2F&path=%2Fhome%2Fdemo-user"
         )
         projects = next(item for item in level_two["children"] if item["name"] == "projects")
         self.assertTrue(projects["can_delete"])
         self.assertEqual(projects["delete_min_depth"], 3)
         status, result = self.request(
             "/api/hosts/demo-1/directories/clear", "POST",
-            {"mount": "/", "path": "/home/devhost/projects"},
+            {"mount": "/", "path": "/home/demo-user/projects"},
         )
         self.assertEqual((status, result["ok"]), (200, True))
         _, cleared = self.request(
-            "/api/hosts/demo-1/directories?mount=%2F&path=%2Fhome%2Fdevhost%2Fprojects"
+            "/api/hosts/demo-1/directories?mount=%2F&path=%2Fhome%2Fdemo-user%2Fprojects"
         )
         self.assertEqual(cleared["children"], [])
 
@@ -198,7 +198,7 @@ class CollectorTests(unittest.TestCase):
             'users:(("sshd",pid=712015,fd=8))\n'
         )
         connection = (
-            "0 0 10.8.0.7:22 116.231.128.88:50960 "
+            "0 0 10.8.0.7:22 8.8.8.8:50960 "
             'users:(("sshd",pid=712015,fd=4))\n'
         )
         responses = [
@@ -209,7 +209,7 @@ class CollectorTests(unittest.TestCase):
             peer = app._tunnel_peer_address({
                 "id": "tunnel", "address": "127.0.0.1", "port": 2222, "local": False,
             })
-            self.assertEqual(peer, "116.231.128.88")
+            self.assertEqual(peer, "8.8.8.8")
             self.assertEqual(run.call_count, 2)
         with mock.patch("monitor.subprocess.run") as run:
             self.assertIsNone(app._tunnel_peer_address({
@@ -289,6 +289,39 @@ class HostHealthTests(unittest.TestCase):
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_default_hosts_prefers_ignored_local_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            committed = root / "hosts.json"
+            private = root / "hosts.local.json"
+            committed.write_text(json.dumps({
+                "hosts": [{
+                    "id": "public", "name": "脱敏默认", "address": "127.0.0.1",
+                    "port": 22, "local": True,
+                }]
+            }))
+            private.write_text(json.dumps({
+                "hosts": [{
+                    "id": "private", "name": "本机私有配置", "address": "127.0.0.1",
+                    "port": 22, "local": True,
+                }]
+            }))
+
+            with mock.patch("monitor.ROOT", root):
+                app = MonitorApp(
+                    Config("127.0.0.1", 0, 60, False, False, None, None), None
+                )
+            self.assertEqual(app.hosts_path, private)
+            self.assertEqual(app.hosts[0]["id"], "private")
+
+            private.unlink()
+            with mock.patch("monitor.ROOT", root):
+                app = MonitorApp(
+                    Config("127.0.0.1", 0, 60, False, False, None, None), None
+                )
+            self.assertEqual(app.hosts_path, committed)
+            self.assertEqual(app.hosts[0]["id"], "public")
+
     def test_hosts_are_persisted_atomically(self):
         with tempfile.TemporaryDirectory() as directory:
             hosts_path = Path(directory) / "hosts.json"
@@ -317,10 +350,10 @@ class PersistenceTests(unittest.TestCase):
     def test_loopback_frontend_host_uses_ssh(self):
         app = MonitorApp(Config("127.0.0.1", 0, 60, False, False, None, None), None)
         host = app._normalize_host({
-            "name": "11", "address": "127.0.0.1", "user": "devhost", "port": 2222,
+            "name": "11", "address": "127.0.0.1", "user": "demo-user", "port": 2222,
         })
         self.assertFalse(host["local"])
-        self.assertEqual((host["user"], host["port"]), ("devhost", 2222))
+        self.assertEqual((host["user"], host["port"]), ("demo-user", 2222))
 
 
 class DirectorySafetyTests(unittest.TestCase):
@@ -358,7 +391,7 @@ class DirectorySafetyTests(unittest.TestCase):
         )
         app.hosts = [{
             "id": "remote", "name": "Remote", "address": "127.0.0.1",
-            "user": "devhost", "port": 2222, "local": False,
+            "user": "demo-user", "port": 2222, "local": False,
         }]
         app.data["remote"] = {
             "processes": [], "summary": {}, "status": "normal", "updated_at": 1,
@@ -475,7 +508,7 @@ class DirectorySafetyTests(unittest.TestCase):
                 for key, value in app.directory_cache.items()
             }
             app.tunnel_peer_cache[("127.0.0.1", 2222)] = (
-                time.monotonic() - 601, "116.231.128.88",
+                time.monotonic() - 601, "8.8.8.8",
             )
             app._prune_memory_caches()
             self.assertEqual((app.directory_cache, app.tunnel_peer_cache), ({}, {}))
