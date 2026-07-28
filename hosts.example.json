@@ -1,0 +1,6 @@
+{
+  "hosts": [
+    {"id": "dev", "name": "开发机", "address": "192.168.1.18", "user": "monitor", "port": 22},
+    {"id": "database", "name": "数据库", "address": "10.0.2.14", "user": "monitor", "port": 22}
+  ]
+}

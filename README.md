@@ -1,1 +1,262 @@
-# monitor
+# 极简多机进程监视器
+
+Python 标准库后端、原生 HTML/CSS/JavaScript 前端、系统 SSH、零数据库、目标机零 Agent。
+
+正式文档只有三份：
+
+- 产品行为：[`../prd/PRD.md`](../prd/PRD.md)
+- 技术实现：[`../prd/TECHNICAL_DESIGN.md`](../prd/TECHNICAL_DESIGN.md)
+- 启动运维：本 README
+
+## 1. 快速体验
+
+```bash
+cd /home/ubuntu/Developer/monitor/monitor
+python3 monitor.py --demo --allow-kill --allow-delete 3
+```
+
+浏览器访问：
+
+```text
+http://127.0.0.1:8080
+```
+
+演示模式提供四台模拟机器、进程变化、硬盘目录树、终止与清空操作，不访问真实服务器。
+
+## 2. 监控本机
+
+只读启动：
+
+```bash
+python3 monitor.py
+```
+
+允许终止进程，并从第 3 级开始清空目录内部内容：
+
+```bash
+python3 monitor.py --allow-kill --allow-delete 3
+```
+
+默认监听：
+
+```text
+127.0.0.1:8080
+```
+
+## 3. 通过局域网或公网 IP 直接访问
+
+监听非本机地址时必须配置 Web 登录：
+
+```bash
+MONITOR_USERNAME=admin \
+MONITOR_PASSWORD='替换为强密码' \
+python3 monitor.py \
+  --allow-kill \
+  --allow-delete 3 \
+  --bind=0.0.0.0 \
+  --port=8080
+```
+
+访问：
+
+```text
+http://服务器IP:8080
+```
+
+浏览器会显示 HTTP Basic Authentication 登录框。用户名和密码由 `monitor.py` 校验，不写入 `hosts.json`。
+
+程序自身只提供 HTTP。直接开放公网可以访问，但明文 HTTP 不能保护登录凭据和危险操作；长期公网使用应配置 HTTPS。
+
+## 4. 通过域名访问
+
+推荐让 `monitor.py` 只监听回环地址：
+
+```bash
+MONITOR_USERNAME=admin \
+MONITOR_PASSWORD='替换为强密码' \
+python3 monitor.py \
+  --allow-kill \
+  --allow-delete 3 \
+  --bind=127.0.0.1 \
+  --port=9500
+```
+
+再由 Caddy、Nginx 或可信 VPN 将域名流量转发到：
+
+```text
+http://127.0.0.1:9500
+```
+
+反向代理负责域名和 HTTPS，`monitor.py` 负责页面、API 与 Basic Authentication。
+
+## 5. 添加远程机器
+
+在页面顶部机器 Tab 的 `＋` 中填写：
+
+- 机器名称
+- IP 地址或主机名
+- SSH 用户
+- SSH 端口
+
+“测试连接”只验证，不保存；“保存”会在最终验证成功后写入 `hosts.json`。
+
+运行 `monitor.py` 的系统账户必须可以免交互登录目标机：
+
+```bash
+ssh -o BatchMode=yes -p 22 user@server true
+```
+
+网页不接收 SSH 密码或私钥。请提前配置 SSH Key 和目标机的 `authorized_keys`。
+
+也可以复制并编辑示例配置：
+
+```bash
+cp hosts.example.json hosts.json
+python3 monitor.py --hosts hosts.json
+```
+
+机器配置修改后无需重启；`monitor.py` 自身代码修改后需要重启服务。
+
+## 6. 反向 SSH 隧道
+
+如果远程机器通过反向隧道映射到监控机回环地址，例如：
+
+```text
+127.0.0.1:2222
+```
+
+机器配置应保留真实隧道入口：
+
+```json
+{
+  "name": "22服务器",
+  "address": "127.0.0.1",
+  "user": "devhost",
+  "port": 2222,
+  "local": false
+}
+```
+
+程序只对“非本机 + 回环地址”尝试识别隧道公网对端。识别使用：
+
+```bash
+sudo -n ss -H -ltnp
+sudo -n ss -H -tnp state established
+```
+
+运行账户需要免密执行上述 `ss` 命令。识别结果缓存 10 分钟；失败时页面显示 `127.0.0.1:2222`，不会影响普通 SSH 地址。
+
+## 7. 采集与缓存行为
+
+- 页面只周期采集当前选中的机器。
+- 后端每 30 秒并行执行一次轻量 SSH 健康检查；这不会采集其他机器的 CPU、内存、硬盘或进程。
+- 每个机器 Tab 的点表示 SSH 连通性：成功为绿，首次检测或首次失败复查为黄，连续两次失败为红。
+- 首次失败约 3 秒后复查；状态超过 75 秒未更新时显示黄色。
+- 浏览器每 30 秒读取 `/api/host-statuses` 内存缓存，不直接执行或触发 SSH。
+- CPU/内存采集时间前的点只表示当前机器资源采集结果，与 Tab 点逻辑独立。
+- CPU/内存默认每 5 秒刷新一次当前机器。
+- 切走后停止采集旧机器，但保留它的最后快照。
+- 切回来先立即展示缓存，再刷新当前机器。
+- 硬盘页面没有 5 秒刷新，只在点击目录时查询。
+- 后端目录结果缓存 10 分钟；浏览器已经展开的数据继续保留。
+- 服务重启后快照缓存清空，`hosts.json` 机器配置保留。
+
+采集周期可调整，最小 1 秒：
+
+```bash
+python3 monitor.py --interval=5
+```
+
+## 8. 功能开关
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `--allow-kill` | 关闭 | 允许从 CPU/内存页面发送 SIGTERM |
+| `--allow-delete N` | 关闭 | 允许清空挂载点下第 N 级及更深目录的内部内容；N ≥ 3，目标目录保留 |
+| `--demo` | 关闭 | 使用模拟数据 |
+| `--bind` | `127.0.0.1` | HTTP 监听地址 |
+| `--port` | `8080` | HTTP 端口，合法范围 1–65535 |
+| `--interval` | `5` | CPU/内存采集周期秒数 |
+| `--hosts` | 同目录 `hosts.json` | 机器配置文件 |
+| `--username` | 环境变量 | Web Basic Auth 用户名 |
+| `--password` | 环境变量 | Web Basic Auth 密码 |
+
+环境变量名称：
+
+```text
+MONITOR_USERNAME
+MONITOR_PASSWORD
+```
+
+## 9. 常见问题
+
+### 端口报 `OverflowError`
+
+端口必须在 1–65535 之间：
+
+```bash
+python3 monitor.py --port=9500
+```
+
+不要把多个数字或其他参数误写到 `--port` 后面。
+
+### 页面修改后没有变化
+
+服务不支持代码热更新。停止旧进程后重新启动，并刷新浏览器：
+
+```bash
+ss -ltnp | grep ':8080'
+```
+
+### SSH 测试通过但保存失败
+
+检查机器名称、地址、用户和端口是否仍是测试时的值。保存会再次执行连接验证。
+
+### 目录统计很慢
+
+目录占用使用 `du` 递归读取文件元数据。首次扫描大目录或大量小文件可能较慢；完成后同一路径缓存 10 分钟。远程扫描会跳过 `/proc`、`/dev`、`/sys` 等属于其他设备的直接子挂载点。
+
+### `Permission denied`
+
+目录读取、终止进程和清空目录都使用本机运行账户或远程 SSH 用户权限。部分子目录不可读时，页面保留可读结果，并显示具体路径，例如 `无法读取 /home/lighthouse：Permission denied`；目标目录本身不可读时则停止该次统计。请只授予实际需要的最小权限。
+
+若页面显示 `SSH 连接失败`，再检查目标地址、端口、密钥和反向隧道；单纯的目录 `Permission denied` 表示 SSH 已经连通，只是远程用户没有相应文件权限。
+
+## 10. 测试
+
+后端：
+
+```bash
+python3 -m py_compile monitor.py
+python3 -m unittest discover -s tests -v
+```
+
+浏览器回归先启动干净演示服务：
+
+```bash
+python3 monitor.py \
+  --demo \
+  --allow-kill \
+  --allow-delete 3 \
+  --bind=127.0.0.1 \
+  --port=8765
+```
+
+另一个终端执行：
+
+```bash
+node tests/browser_test.mjs http://127.0.0.1:8765
+```
+
+浏览器测试需要本机安装 Chromium 或 Chrome。
+
+## 11. 当前实现文件
+
+```text
+index.html              当前 Web 页面
+monitor.py              后端、采集、缓存和 API
+hosts.example.json      机器配置示例
+hosts.json              当前机器配置
+tests/test_monitor.py   Python 后端测试
+tests/browser_test.mjs  Chromium 端到端测试
+```

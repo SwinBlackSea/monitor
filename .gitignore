@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+.visual-check.png
+hosts.json
