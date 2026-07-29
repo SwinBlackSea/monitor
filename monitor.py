@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Minimal multi-host process monitor using only the Python standard library."""
+"""Minimal multi-host process monitor using only the Python standard library.
+
+设计约束：
+- 单进程同时提供页面、API、内存缓存和后台健康检查。
+- CPU/内存快照由页面按需触发，同一机器的并发请求合并为一次采集。
+- 目录占用只在展开时计算并缓存，不进入 5 秒资源采集周期。
+- 目标机只需要 SSH，不安装 Agent，也不保存历史时序数据。
+"""
 
 from __future__ import annotations
 
@@ -45,6 +52,7 @@ def safe_id(value: str) -> str:
 
 
 def parse_ps(text: str) -> list[dict[str, Any]]:
+    """Parse the fixed `ps -eo` columns and resolve parent process names."""
     rows: list[dict[str, Any]] = []
     for line in text.splitlines():
         parts = line.split(None, 10)
@@ -68,6 +76,7 @@ def parse_ps(text: str) -> list[dict[str, Any]]:
 
 
 def parse_df(text: str) -> list[dict[str, Any]]:
+    """Parse byte-based `df -PT -B1` output into mount summaries."""
     rows: list[dict[str, Any]] = []
     for line in text.splitlines():
         parts = line.split()
@@ -83,6 +92,7 @@ def parse_df(text: str) -> list[dict[str, Any]]:
 
 
 def read_local_snapshot() -> dict[str, Any]:
+    """Collect the same snapshot locally that `_read_ssh` collects remotely."""
     ps = subprocess.run(
         ["ps", "-eo", "pid=,ppid=,user=,comm=,nlwp=,pcpu=,rss=,pmem=,lstart="],
         capture_output=True, text=True, check=True, timeout=8,
@@ -185,6 +195,8 @@ def demo_snapshot(host_index: int, tick: int) -> dict[str, Any]:
 
 @dataclass
 class Config:
+    """Validated process-wide settings derived from CLI flags and environment."""
+
     bind: str
     port: int
     interval: float
@@ -201,18 +213,26 @@ class Config:
 
 
 class MonitorApp:
+    """Own all mutable host state, caches, collectors, and dangerous operations."""
+
     def __init__(self, config: Config, hosts_path: Path | None):
         self.config = config
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.tick = 0
+        # Demo mutations intentionally live only for this process lifetime.
         self.demo_cleared_directories: set[tuple[str, str]] = set()
         self.demo_terminated_processes: set[tuple[str, int]] = set()
+        # Directory results are KV cached by (host, mount, path). Jobs prevent
+        # identical clicks from launching duplicate `du` traversals.
         self.directory_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
         self.directory_jobs: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.directory_generation: dict[str, int] = {}
+        # Connectivity and tunnel identity are independent from resource status.
         self.tunnel_peer_cache: dict[tuple[str, int], tuple[float, str | None]] = {}
         self.host_health: dict[str, dict[str, Any]] = {}
+        # Resource snapshots use monotonic TTLs, per-host generations, and
+        # per-host locks to implement request-driven single-flight collection.
         self.snapshot_collected_at: dict[str, float] = {}
         self.snapshot_generation: dict[str, int] = {}
         self.snapshot_locks: dict[str, threading.Lock] = {}
@@ -228,6 +248,7 @@ class MonitorApp:
         self.health_thread: threading.Thread | None = None
 
     def _load_hosts(self, path: Path) -> list[dict[str, Any]]:
+        """Load demo hosts, persisted hosts, or the safe local default."""
         if self.config.demo:
             names = ["开发机", "生产服务器", "数据库", "备份机"]
             return [{"id": f"demo-{i + 1}", "name": name, "address": "demo", "port": 22}
@@ -240,6 +261,7 @@ class MonitorApp:
                  "local": True}]
 
     def _persist_hosts(self) -> None:
+        """Atomically replace the host JSON so a failed write cannot truncate it."""
         if self.config.demo:
             return
         allowed = ("id", "name", "address", "user", "port", "local")
@@ -251,6 +273,7 @@ class MonitorApp:
 
     def _normalize_host(self, values: dict[str, Any], current: dict[str, Any] | None = None
                         ) -> dict[str, Any]:
+        """Merge and validate fields accepted from the host management form."""
         host = dict(current or {})
         name = str(values.get("name", host.get("name", ""))).strip()
         address = str(values.get("address", host.get("address", ""))).strip()
@@ -282,6 +305,7 @@ class MonitorApp:
         return host
 
     def start(self) -> None:
+        """Start cache maintenance and the independent SSH health loop."""
         self.thread = threading.Thread(target=self._loop, daemon=True, name="maintenance")
         self.thread.start()
         self.health_thread = threading.Thread(
@@ -301,6 +325,7 @@ class MonitorApp:
             self.health_thread.join(timeout=6)
 
     def _prune_memory_caches(self) -> None:
+        """Drop expired directory and tunnel results; resource snapshots persist."""
         now = time.monotonic()
         with self.lock:
             self.directory_cache = {
@@ -313,6 +338,7 @@ class MonitorApp:
             }
 
     def _probe_host(self, host: dict[str, Any]) -> tuple[bool, str | None]:
+        """Run only `ssh ... true`; this never collects resource information."""
         if self.config.demo:
             reachable = host["id"] != "demo-4"
             return reachable, None if reachable else "模拟 SSH 连接失败"
@@ -352,6 +378,7 @@ class MonitorApp:
         self, host_id: str, reachable: bool, error: str | None = None,
         expected_host: dict[str, Any] | None = None,
     ) -> str:
+        """Apply green/yellow/red health transitions without accepting stale probes."""
         with self.lock:
             current_host = next(
                 (host for host in self.hosts if host["id"] == host_id), None
@@ -366,6 +393,7 @@ class MonitorApp:
                 return "warning"
             previous = self.host_health.get(host_id, {})
             failures = 0 if reachable else int(previous.get("failures", 0)) + 1
+            # The first failure is yellow until the short retry also fails.
             status = "normal" if reachable else ("warning" if failures == 1 else "offline")
             self.host_health[host_id] = {
                 "status": status,
@@ -379,6 +407,7 @@ class MonitorApp:
     def _health_probe_batch(
         self, hosts: list[dict[str, Any]]
     ) -> list[tuple[dict[str, Any], bool, str | None]]:
+        """Probe a bounded batch so 10 hosts cannot create unbounded SSH fan-out."""
         if not hosts:
             return []
         results: list[tuple[dict[str, Any], bool, str | None]] = []
@@ -397,6 +426,7 @@ class MonitorApp:
         return results
 
     def check_host_health(self) -> None:
+        """Probe all configured hosts and retry first failures once after 3 seconds."""
         with self.lock:
             hosts = [dict(host) for host in self.hosts]
         self._mark_health_checking([host["id"] for host in hosts])
@@ -430,6 +460,7 @@ class MonitorApp:
                 return
 
     def _host_health_info(self, host_id: str, now: int | None = None) -> dict[str, Any]:
+        """Derive the public Tab-dot state from the latest lightweight probe."""
         with self.lock:
             cached = dict(self.host_health.get(host_id, {}))
         checked_at = cached.get("checked_at")
@@ -451,6 +482,14 @@ class MonitorApp:
         return [self._host_health_info(host_id, current) for host_id in host_ids]
 
     def collect_host(self, host_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Return a fresh-enough shared snapshot, collecting at most once per host.
+
+        The cache is checked before and after taking the per-host lock. This
+        double-check is the single-flight boundary: one expired request performs
+        the work, while concurrent requests wait and then reuse its result.
+        Generations prevent results started before a kill, clear, edit, or delete
+        from overwriting the newer state.
+        """
         while True:
             with self.lock:
                 item = next(
@@ -473,6 +512,8 @@ class MonitorApp:
                 )
 
             with collection_lock:
+                # Another request may have refreshed the host while this request
+                # waited for the collection lock, so freshness must be rechecked.
                 with self.lock:
                     item = next(
                         ((index, dict(host)) for index, host in enumerate(self.hosts)
@@ -517,6 +558,7 @@ class MonitorApp:
             # Retry after releasing the per-host lock; the stale result is discarded.
 
     def _invalidate_snapshot(self, host_id: str) -> None:
+        """Expire a snapshot and invalidate any collector already in flight."""
         with self.lock:
             self.snapshot_generation[host_id] = (
                 self.snapshot_generation.get(host_id, 0) + 1
@@ -524,15 +566,18 @@ class MonitorApp:
             self.snapshot_collected_at.pop(host_id, None)
 
     def _refresh_host(self, host: dict[str, Any], index: int) -> tuple[str, dict[str, Any]]:
+        """Collect without raising connectivity errors to HTTP callers."""
         try:
             snapshot = self._collect_host(host, index)
         except Exception as exc:
             with self.lock:
                 previous = self.data.get(host["id"], {"processes": [], "filesystems": [], "summary": {}})
+            # Preserve the last useful values while exposing the failed status.
             snapshot = {**previous, "status": "offline", "updated_at": now_ms(), "error": str(exc)}
         return host["id"], snapshot
 
     def _collect_host(self, host: dict[str, Any], index: int = 0) -> dict[str, Any]:
+        """Dispatch one real or demo collection without applying cache policy."""
         if self.config.demo:
             snapshot = demo_snapshot(index, self.tick)
             removed = {
@@ -554,7 +599,10 @@ class MonitorApp:
         return snapshot
 
     def _read_ssh(self, host: dict[str, Any]) -> dict[str, Any]:
+        """Collect processes, mounts, load, memory, and HOME in one SSH round trip."""
         destination = f'{host.get("user", "") + "@" if host.get("user") else ""}{host["address"]}'
+        # Section markers keep the remote side dependency-free while allowing one
+        # SSH process to return all parts of the snapshot consistently.
         command = (
             "printf '__PS__\\n'; ps -eo pid=,ppid=,user=,comm=,nlwp=,pcpu=,rss=,pmem=,lstart=; "
             "printf '__DF__\\n'; df -PT -B1 --exclude-type=tmpfs --exclude-type=devtmpfs; "
@@ -605,6 +653,12 @@ class MonitorApp:
             return False
 
     def _tunnel_peer_address(self, host: dict[str, Any]) -> str | None:
+        """Resolve a reverse-tunnel listener to its public SSH peer when possible.
+
+        Normal remote addresses are returned untouched. Only non-local hosts that
+        point at loopback are candidates, which avoids changing ordinary SSH
+        display semantics.
+        """
         address = str(host.get("address", ""))
         if host.get("local") or not self._loopback_address(address):
             return None
@@ -653,6 +707,7 @@ class MonitorApp:
         return peer
 
     def host_list(self) -> list[dict[str, Any]]:
+        """Return host metadata and cached summaries without triggering collection."""
         with self.lock:
             pairs = [(dict(host), dict(self.data.get(host["id"], {})))
                      for host in self.hosts]
@@ -714,6 +769,7 @@ class MonitorApp:
 
     def get_host(self, host_id: str, collect_if_missing: bool = False
                  ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Read host state and optionally collect only when no snapshot exists."""
         with self.lock:
             host = next((h for h in self.hosts if h["id"] == host_id), None)
             data = self.data.get(host_id)
@@ -726,6 +782,7 @@ class MonitorApp:
         raise KeyError(host_id)
 
     def add_host(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Validate connectivity before persisting a new host."""
         host = self._normalize_host(values)
         with self.lock:
             base = safe_id(str(values.get("id") or host["name"] or host["address"]))
@@ -752,6 +809,7 @@ class MonitorApp:
         return self._host_change_result(host, snapshot)
 
     def update_host(self, host_id: str, values: dict[str, Any]) -> dict[str, Any]:
+        """Update a host, testing changed SSH coordinates before committing them."""
         with self.lock:
             index = next((i for i, host in enumerate(self.hosts) if host["id"] == host_id), None)
             if index is None:
@@ -762,6 +820,8 @@ class MonitorApp:
                                  for key in ("address", "user", "port"))
         snapshot = None
         if connection_changed:
+            # A failed test leaves both the JSON file and current in-memory host
+            # untouched, so editing a connection cannot break a working entry.
             try:
                 snapshot = self._collect_host(updated, index)
             except Exception as exc:
@@ -803,6 +863,7 @@ class MonitorApp:
         )
 
     def test_host(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Test form values with a real snapshot without saving any configuration."""
         host_id = str(values.get("id", "")).strip()
         with self.lock:
             current = next((dict(host) for host in self.hosts if host["id"] == host_id), None)
@@ -822,6 +883,7 @@ class MonitorApp:
 
     def _validate_directory(self, host_id: str, mount: str, path: str
                             ) -> tuple[dict[str, Any], str, str, int, int]:
+        """Normalize a requested path and prove it remains inside its mount."""
         host, data = self.get_host(host_id, collect_if_missing=True)
         if "\0" in mount or "\0" in path:
             raise ValueError("目录路径不正确")
@@ -836,6 +898,8 @@ class MonitorApp:
         if filesystem is None:
             raise ValueError("挂载点不存在或尚未采集")
         try:
+            # A path-component comparison prevents `/data-old` from being
+            # mistaken for a child of `/data`.
             if posixpath.commonpath([mount, path]) != mount:
                 raise ValueError("目录不属于指定挂载点")
         except ValueError:
@@ -875,6 +939,7 @@ class MonitorApp:
     def _remote_directory_error(
         stderr: bytes, path: str, returncode: int
     ) -> tuple[str, int]:
+        """Turn remote shell and `du` failures into specific UI messages."""
         text = os.fsdecode(stderr).strip()
         matches: list[tuple[str, str]] = []
         seen: set[tuple[str, str]] = set()
@@ -918,6 +983,7 @@ class MonitorApp:
         )
 
     def _resolved_local_directory(self, mount: str, path: str) -> Path:
+        """Resolve symlinks and enforce the mount boundary for local operations."""
         try:
             resolved_mount = Path(mount).resolve(strict=True)
             resolved_path = Path(path).resolve(strict=True)
@@ -933,6 +999,13 @@ class MonitorApp:
         return resolved_path
 
     def _scan_directories(self, host_id: str, mount: str, path: str) -> dict[str, Any]:
+        """Measure only the direct child directories of one expanded tree node.
+
+        `du -x` prevents traversal into child mounts. Local children use at most
+        four workers; remote children use `xargs -P 4` inside one SSH session.
+        Results are sorted only after every worker completes so rows do not jump
+        while the user is reading them.
+        """
         host, mount, path, depth, total = self._validate_directory(host_id, mount, path)
         entries: list[tuple[str, int]] = []
         warning = None
@@ -978,6 +1051,8 @@ class MonitorApp:
                 return None
 
             errors: list[str] = []
+            # Each worker owns one disjoint direct child. Four workers balance
+            # latency against metadata I/O pressure on the monitored disk.
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=min(4, max(1, len(directories))),
                 thread_name_prefix="du",
@@ -994,6 +1069,8 @@ class MonitorApp:
                 raise OSError(errors[0])
         else:
             root_q, target_q = shlex.quote(mount), shlex.quote(path)
+            # Canonicalize and check boundaries remotely before `find`; every
+            # user-derived shell argument above is protected by shlex.quote.
             command = (
                 f"root=$(readlink -f -- {root_q}) || exit 20; "
                 f"target=$(readlink -f -- {target_q}) || exit 21; "
@@ -1032,6 +1109,7 @@ class MonitorApp:
         return result
 
     def list_directories(self, host_id: str, mount: str, path: str) -> dict[str, Any]:
+        """Return a cached directory level or start one shared background job."""
         host, mount, path, depth, _ = self._validate_directory(host_id, mount, path)
         if self.config.demo:
             return self._scan_directories(host_id, mount, path)
@@ -1052,6 +1130,7 @@ class MonitorApp:
                 }
 
                 def scan() -> None:
+                    """Publish this KV job only if its host generation is current."""
                     try:
                         result = self._scan_directories(host_id, mount, path)
                     except subprocess.TimeoutExpired:
@@ -1092,6 +1171,7 @@ class MonitorApp:
         }
 
     def _invalidate_directory_cache(self, host_id: str) -> None:
+        """Invalidate every directory result and in-flight job for one host."""
         with self.lock:
             self.directory_generation[host_id] = self.directory_generation.get(host_id, 0) + 1
             self.directory_cache = {
@@ -1103,6 +1183,7 @@ class MonitorApp:
 
     @staticmethod
     def _clear_local_contents(target: Path) -> int:
+        """Remove descendants on the same device while preserving `target` itself."""
         root_device = target.stat().st_dev
         removed = 0
 
@@ -1126,6 +1207,7 @@ class MonitorApp:
         return removed
 
     def clear_directory(self, host_id: str, mount: str, path: str) -> dict[str, Any]:
+        """Clear an eligible directory after repeating all server-side safeguards."""
         if not self.config.allow_delete:
             raise PermissionError("未启用清空目录功能，请使用 --allow-delete 启动")
         host, mount, path, depth, _ = self._validate_directory(host_id, mount, path)
@@ -1146,6 +1228,7 @@ class MonitorApp:
                 f"target=$(readlink -f -- {target_q}) || exit 21; "
                 '[ -d "$target" ] || exit 22; '
                 'if [ "$root" != "/" ]; then case "$target" in "$root"|"$root"/*) ;; *) exit 23;; esac; fi; '
+                # `-mindepth 1` is the invariant that preserves the target itself.
                 'find "$target" -xdev -mindepth 1 -depth -print0 -delete'
             )
             result = self._ssh_command(host, command, timeout=60)
@@ -1159,6 +1242,7 @@ class MonitorApp:
         return {"ok": True, "path": path, "removed": removed, "cleared_at": now_ms()}
 
     def delete_host(self, host_id: str) -> None:
+        """Atomically remove a host while keeping at least one configured machine."""
         with self.lock:
             index = next((i for i, host in enumerate(self.hosts) if host["id"] == host_id), None)
             if index is None:
@@ -1185,6 +1269,7 @@ class MonitorApp:
         self._invalidate_directory_cache(host_id)
 
     def _remove_cached_process(self, host_id: str, pid: int) -> bool:
+        """Optimistically remove a terminated PID from the visible snapshot."""
         with self.lock:
             data = self.data.get(host_id)
             if not data:
@@ -1204,6 +1289,7 @@ class MonitorApp:
             return True
 
     def _refresh_host_soon(self, host_id: str) -> None:
+        """Invalidate now and collect shortly after the remote state can settle."""
         self._invalidate_snapshot(host_id)
 
         def collect() -> None:
@@ -1219,6 +1305,7 @@ class MonitorApp:
         ).start()
 
     def terminate(self, host_id: str, pid: int) -> None:
+        """Send SIGTERM after enforcing the explicit feature and PID safeguards."""
         if not self.config.allow_kill:
             raise PermissionError("未启用结束进程功能")
         if pid <= 1 or pid == os.getpid():
@@ -1241,13 +1328,18 @@ class MonitorApp:
 
 
 def make_handler(app: MonitorApp):
+    """Bind one MonitorApp to the standard-library threaded HTTP handler."""
+
     class Handler(BaseHTTPRequestHandler):
+        """Serve the single-page UI and its JSON API with optional Basic Auth."""
+
         server_version = "Monitor/1.0"
 
         def log_message(self, fmt: str, *args: Any) -> None:
             print(f"{self.address_string()} - {fmt % args}")
 
         def authenticated(self) -> bool:
+            """Challenge every page and API request when credentials are configured."""
             if not app.config.username:
                 return True
             expected = base64.b64encode(
@@ -1261,6 +1353,7 @@ def make_handler(app: MonitorApp):
             return False
 
         def send_json(self, value: Any, status: int = 200) -> None:
+            """Serialize compact JSON and gzip process-heavy responses when accepted."""
             body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
             compressed = len(body) >= 1024 and "gzip" in self.headers.get(
                 "Accept-Encoding", ""
@@ -1282,6 +1375,7 @@ def make_handler(app: MonitorApp):
             return json.loads(self.rfile.read(length) or b"{}")
 
         def do_GET(self) -> None:
+            """Serve reads; metadata/health endpoints never trigger collection."""
             if not self.authenticated():
                 return
             parsed = urllib.parse.urlparse(self.path)
@@ -1362,6 +1456,7 @@ def make_handler(app: MonitorApp):
             self.send_json({"error": "接口不存在"}, 404)
 
         def do_PATCH(self) -> None:
+            """Edit one host after connection validation."""
             if not self.authenticated():
                 return
             match = re.fullmatch(r"/api/hosts/([^/]+)", urllib.parse.urlparse(self.path).path)
@@ -1379,6 +1474,7 @@ def make_handler(app: MonitorApp):
                 self.send_json({"error": f"保存失败：{exc}"}, 500)
 
         def do_POST(self) -> None:
+            """Handle host tests/additions and explicitly enabled dangerous actions."""
             if not self.authenticated():
                 return
             path = urllib.parse.urlparse(self.path).path
@@ -1431,6 +1527,7 @@ def make_handler(app: MonitorApp):
                 self.send_json({"error": str(exc)}, 400)
 
         def do_DELETE(self) -> None:
+            """Delete one configured host while preserving the last remaining host."""
             if not self.authenticated():
                 return
             match = re.fullmatch(r"/api/hosts/([^/]+)", urllib.parse.urlparse(self.path).path)
@@ -1451,6 +1548,8 @@ def make_handler(app: MonitorApp):
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse the deliberately small deployment and capability surface."""
+
     def delete_depth(value: str) -> int:
         try:
             depth = int(value)
@@ -1477,11 +1576,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Validate exposure rules, start background work, and serve until interrupted."""
     args = parse_args()
     if not 1 <= args.port <= 65535:
         raise SystemExit("HTTP 端口必须在 1–65535 之间")
     if bool(args.username) != bool(args.password):
         raise SystemExit("MONITOR_USERNAME 和 MONITOR_PASSWORD 必须同时配置")
+    # Basic Auth is mandatory when the built-in HTTP server leaves loopback.
+    # TLS remains the responsibility of a trusted reverse proxy or private network.
     if (args.bind not in {"127.0.0.1", "::1", "localhost"}
             and not args.demo and not args.username):
         raise SystemExit("非本机监听必须配置 MONITOR_USERNAME 和 MONITOR_PASSWORD")
