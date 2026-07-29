@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import gzip
 import subprocess
@@ -73,6 +74,7 @@ class ApiTests(unittest.TestCase):
         status, data = self.request("/api/hosts")
         self.assertEqual(status, 200)
         self.assertEqual(len(data["hosts"]), 4)
+        self.assertEqual(data["snapshot_interval_seconds"], 60)
         _, payload = self.request("/api/hosts/demo-1/processes")
         self.assertGreater(len(payload["processes"]), 5)
         self.assertIn("parent_name", payload["processes"][0])
@@ -169,7 +171,7 @@ class ApiTests(unittest.TestCase):
 
 
 class CollectorTests(unittest.TestCase):
-    def test_only_selected_host_is_collected_and_cached(self):
+    def test_only_selected_host_is_collected_and_snapshot_is_shared_until_expiry(self):
         app = MonitorApp(Config("127.0.0.1", 0, 5, True, False, None, None), None)
         app.hosts = [{"id": f"h{i}", "name": f"H{i}", "address": "demo"} for i in range(4)]
         calls = []
@@ -187,9 +189,106 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(calls, ["h2"])
         self.assertEqual(list(app.data), ["h2"])
         app.collect_host("h2")
+        self.assertEqual(calls, ["h2"])
+        app.snapshot_collected_at["h2"] -= 6
+        app.collect_host("h2")
         self.assertEqual(calls, ["h2", "h2"])
+        app._invalidate_snapshot("h2")
+        app.collect_host("h2")
+        self.assertEqual(calls, ["h2", "h2", "h2"])
         self.assertEqual(list(app.data), ["h2"])
         app.close()
+
+    def test_concurrent_same_host_requests_join_one_collection(self):
+        app = MonitorApp(Config("127.0.0.1", 0, 5, True, False, None, None), None)
+        app.hosts = [{"id": "shared", "name": "Shared", "address": "demo"}]
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def slow_snapshot(host, index):
+            calls.append(host["id"])
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return {
+                "processes": [], "filesystems": [], "summary": {},
+                "status": "normal", "updated_at": 123, "error": None,
+            }
+
+        app._collect_host = slow_snapshot
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(app.collect_host, "shared") for _ in range(10)]
+            self.assertTrue(entered.wait(1))
+            time.sleep(0.05)
+            self.assertEqual(calls, ["shared"])
+            release.set()
+            results = [future.result(timeout=2) for future in futures]
+
+        self.assertEqual(calls, ["shared"])
+        self.assertTrue(all(snapshot["updated_at"] == 123 for _, snapshot in results))
+
+    def test_different_hosts_can_collect_in_parallel(self):
+        app = MonitorApp(Config("127.0.0.1", 0, 5, True, False, None, None), None)
+        app.hosts = [
+            {"id": "host-a", "name": "Host A", "address": "demo"},
+            {"id": "host-b", "name": "Host B", "address": "demo"},
+        ]
+        both_collectors_entered = threading.Barrier(2)
+        calls = []
+        calls_lock = threading.Lock()
+
+        def parallel_snapshot(host, index):
+            with calls_lock:
+                calls.append(host["id"])
+            both_collectors_entered.wait(timeout=1)
+            return {
+                "processes": [], "filesystems": [], "summary": {},
+                "status": "normal", "updated_at": host["id"], "error": None,
+            }
+
+        app._collect_host = parallel_snapshot
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(app.collect_host, "host-a"),
+                executor.submit(app.collect_host, "host-b"),
+            ]
+            results = [future.result(timeout=2) for future in futures]
+
+        self.assertCountEqual(calls, ["host-a", "host-b"])
+        self.assertCountEqual(
+            [snapshot["updated_at"] for _, snapshot in results],
+            ["host-a", "host-b"],
+        )
+
+    def test_invalidation_discards_an_inflight_snapshot_and_forces_retry(self):
+        app = MonitorApp(Config("127.0.0.1", 0, 5, True, False, None, None), None)
+        app.hosts = [{"id": "shared", "name": "Shared", "address": "demo"}]
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def snapshot(host, index):
+            calls.append(host["id"])
+            sequence = len(calls)
+            if sequence == 1:
+                entered.set()
+                release.wait(2)
+            return {
+                "processes": [], "filesystems": [], "summary": {},
+                "status": "normal", "updated_at": sequence, "error": None,
+            }
+
+        app._collect_host = snapshot
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            future = executor.submit(app.collect_host, "shared")
+            self.assertTrue(entered.wait(1))
+            app._invalidate_snapshot("shared")
+            release.set()
+            _, result = future.result(timeout=2)
+
+        self.assertEqual(calls, ["shared", "shared"])
+        self.assertEqual(result["updated_at"], 2)
+        self.assertEqual(app.data["shared"]["updated_at"], 2)
 
     def test_reverse_tunnel_peer_is_detected_without_touching_normal_ssh(self):
         app = MonitorApp(Config("127.0.0.1", 0, 5, False, False, None, None), None)

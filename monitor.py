@@ -213,6 +213,9 @@ class MonitorApp:
         self.directory_generation: dict[str, int] = {}
         self.tunnel_peer_cache: dict[tuple[str, int], tuple[float, str | None]] = {}
         self.host_health: dict[str, dict[str, Any]] = {}
+        self.snapshot_collected_at: dict[str, float] = {}
+        self.snapshot_generation: dict[str, int] = {}
+        self.snapshot_locks: dict[str, threading.Lock] = {}
         default_hosts_path = (
             ROOT / "hosts.local.json"
             if (ROOT / "hosts.local.json").exists()
@@ -448,22 +451,77 @@ class MonitorApp:
         return [self._host_health_info(host_id, current) for host_id in host_ids]
 
     def collect_host(self, host_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        while True:
+            with self.lock:
+                item = next(
+                    ((index, dict(host)) for index, host in enumerate(self.hosts)
+                     if host["id"] == host_id),
+                    None,
+                )
+                if item is None:
+                    raise KeyError(host_id)
+                cached = self.data.get(host_id)
+                collected_at = self.snapshot_collected_at.get(host_id)
+                if (
+                    cached is not None
+                    and collected_at is not None
+                    and time.monotonic() - collected_at < self.config.interval
+                ):
+                    return item[1], dict(cached)
+                collection_lock = self.snapshot_locks.setdefault(
+                    host_id, threading.Lock()
+                )
+
+            with collection_lock:
+                with self.lock:
+                    item = next(
+                        ((index, dict(host)) for index, host in enumerate(self.hosts)
+                         if host["id"] == host_id),
+                        None,
+                    )
+                    if item is None:
+                        raise KeyError(host_id)
+                    cached = self.data.get(host_id)
+                    collected_at = self.snapshot_collected_at.get(host_id)
+                    if (
+                        cached is not None
+                        and collected_at is not None
+                        and time.monotonic() - collected_at < self.config.interval
+                    ):
+                        return item[1], dict(cached)
+                    index, host = item
+                    generation = self.snapshot_generation.get(host_id, 0)
+                    connection = tuple(
+                        host.get(key) for key in ("address", "user", "port", "local")
+                    )
+                    self.tick += 1
+
+                _, snapshot = self._refresh_host(host, index)
+                with self.lock:
+                    current = next(
+                        (dict(item) for item in self.hosts if item["id"] == host_id),
+                        None,
+                    )
+                    current_connection = tuple(
+                        current.get(key) for key in ("address", "user", "port", "local")
+                    ) if current else None
+                    if (
+                        current is not None
+                        and self.snapshot_generation.get(host_id, 0) == generation
+                        and current_connection == connection
+                    ):
+                        self.data[host_id] = snapshot
+                        self.snapshot_collected_at[host_id] = time.monotonic()
+                        return current, dict(snapshot)
+            # The host was changed or invalidated while collection was running.
+            # Retry after releasing the per-host lock; the stale result is discarded.
+
+    def _invalidate_snapshot(self, host_id: str) -> None:
         with self.lock:
-            item = next(
-                ((index, dict(host)) for index, host in enumerate(self.hosts)
-                 if host["id"] == host_id),
-                None,
+            self.snapshot_generation[host_id] = (
+                self.snapshot_generation.get(host_id, 0) + 1
             )
-            if item is None:
-                raise KeyError(host_id)
-            self.tick += 1
-        index, host = item
-        _, snapshot = self._refresh_host(host, index)
-        with self.lock:
-            if not any(current["id"] == host_id for current in self.hosts):
-                raise KeyError(host_id)
-            self.data[host_id] = snapshot
-        return host, snapshot
+            self.snapshot_collected_at.pop(host_id, None)
 
     def _refresh_host(self, host: dict[str, Any], index: int) -> tuple[str, dict[str, Any]]:
         try:
@@ -690,6 +748,7 @@ class MonitorApp:
                 self.hosts.pop()
                 self.data.pop(host_id, None)
                 raise
+            self.snapshot_collected_at[host_id] = time.monotonic()
         return self._host_change_result(host, snapshot)
 
     def update_host(self, host_id: str, values: dict[str, Any]) -> dict[str, Any]:
@@ -708,13 +767,27 @@ class MonitorApp:
             except Exception as exc:
                 raise ConnectionError(f"连接测试失败：{exc}") from exc
         with self.lock:
+            previous_snapshot = self.data.get(host_id)
+            previous_collected_at = self.snapshot_collected_at.get(host_id)
+            previous_generation = self.snapshot_generation.get(host_id, 0)
             self.hosts[index] = updated
             if snapshot is not None:
+                self.snapshot_generation[host_id] = previous_generation + 1
                 self.data[host_id] = snapshot
+                self.snapshot_collected_at[host_id] = time.monotonic()
             try:
                 self._persist_hosts()
             except Exception:
                 self.hosts[index] = current
+                self.snapshot_generation[host_id] = previous_generation
+                if previous_snapshot is None:
+                    self.data.pop(host_id, None)
+                else:
+                    self.data[host_id] = previous_snapshot
+                if previous_collected_at is None:
+                    self.snapshot_collected_at.pop(host_id, None)
+                else:
+                    self.snapshot_collected_at[host_id] = previous_collected_at
                 raise
             if connection_changed:
                 self.host_health.pop(host_id, None)
@@ -1095,6 +1168,8 @@ class MonitorApp:
             removed = self.hosts.pop(index)
             data = self.data.pop(host_id, None)
             health = self.host_health.pop(host_id, None)
+            collected_at = self.snapshot_collected_at.pop(host_id, None)
+            generation = self.snapshot_generation.get(host_id, 0)
             try:
                 self._persist_hosts()
             except Exception:
@@ -1103,7 +1178,10 @@ class MonitorApp:
                     self.data[host_id] = data
                 if health is not None:
                     self.host_health[host_id] = health
+                if collected_at is not None:
+                    self.snapshot_collected_at[host_id] = collected_at
                 raise
+            self.snapshot_generation[host_id] = generation + 1
         self._invalidate_directory_cache(host_id)
 
     def _remove_cached_process(self, host_id: str, pid: int) -> bool:
@@ -1126,22 +1204,15 @@ class MonitorApp:
             return True
 
     def _refresh_host_soon(self, host_id: str) -> None:
+        self._invalidate_snapshot(host_id)
+
         def collect() -> None:
             if self.stop.wait(0.35):
                 return
-            with self.lock:
-                item = next(
-                    ((index, dict(host)) for index, host in enumerate(self.hosts)
-                     if host["id"] == host_id),
-                    None,
-                )
-            if item is None:
-                return
-            index, host = item
-            _, snapshot = self._refresh_host(host, index)
-            with self.lock:
-                if any(current["id"] == host_id for current in self.hosts):
-                    self.data[host_id] = snapshot
+            try:
+                self.collect_host(host_id)
+            except KeyError:
+                pass
 
         threading.Thread(
             target=collect, daemon=True, name=f"refresh-{safe_id(host_id)}"
@@ -1233,7 +1304,10 @@ def make_handler(app: MonitorApp):
                 })
                 return
             if path == "/api/hosts":
-                self.send_json({"hosts": app.host_list()})
+                self.send_json({
+                    "hosts": app.host_list(),
+                    "snapshot_interval_seconds": app.config.interval,
+                })
                 return
             if path == "/api/host-statuses":
                 self.send_json({

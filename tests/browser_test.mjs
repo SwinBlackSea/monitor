@@ -94,6 +94,7 @@ try {
   assert(initial.cpu.every((v, i, a) => i === 0 || a[i - 1] >= v), "CPU 默认从高到低");
   assert(!initial.bold, "表格内容使用常规字重");
   assert(initial.duplicateIds.length === 0, "页面不存在重复 ID");
+  assert(await evaluate(`state.refreshInterval === 5`), "前端使用后端返回的共享快照周期");
   const statusLine = await evaluate(`({
     oldUpdate: Boolean(document.querySelector("#updated")),
     sample: document.querySelector("#sampleTime")?.textContent,
