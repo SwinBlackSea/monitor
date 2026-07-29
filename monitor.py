@@ -43,10 +43,12 @@ HOST_STATUS_MAX_WORKERS = 8
 
 
 def now_ms() -> int:
+    """Return the current Unix timestamp in milliseconds for API payloads."""
     return int(time.time() * 1000)
 
 
 def safe_id(value: str) -> str:
+    """Convert a host label into a stable URL- and filename-safe identifier."""
     value = re.sub(r"[^a-zA-Z0-9_.-]+", "-", value.strip()).strip("-")
     return value or "host"
 
@@ -158,6 +160,7 @@ DEMO_DIRECTORY_TREE: dict[str, list[tuple[str, int]]] = {
 
 
 def demo_snapshot(host_index: int, tick: int) -> dict[str, Any]:
+    """Generate deterministic but changing process data for demo mode."""
     rng = random.Random(host_index * 100003 + tick)
     processes = []
     base_pid = 1100 + host_index * 1000
@@ -208,6 +211,7 @@ class Config:
     delete_min_depth: int = 3
 
     def __post_init__(self) -> None:
+        """Enforce the minimum safe depth for directory clearing."""
         if self.delete_min_depth < 3:
             raise ValueError("目录清空层级必须至少为 3")
 
@@ -216,6 +220,7 @@ class MonitorApp:
     """Own all mutable host state, caches, collectors, and dangerous operations."""
 
     def __init__(self, config: Config, hosts_path: Path | None):
+        """Initialize persistent host metadata and all process-local state."""
         self.config = config
         self.lock = threading.RLock()
         self.stop = threading.Event()
@@ -314,10 +319,12 @@ class MonitorApp:
         self.health_thread.start()
 
     def _loop(self) -> None:
+        """Periodically prune only caches that have a strict ten-minute TTL."""
         while not self.stop.wait(min(60, max(1, self.config.interval))):
             self._prune_memory_caches()
 
     def close(self) -> None:
+        """Signal background loops and wait briefly for a clean shutdown."""
         self.stop.set()
         if self.thread:
             self.thread.join(timeout=2)
@@ -359,6 +366,7 @@ class MonitorApp:
         return False, detail[-1] if detail else "SSH 连接失败"
 
     def _mark_health_checking(self, host_ids: list[str]) -> None:
+        """Mark selected host dots as being checked without discarding last state."""
         with self.lock:
             current_ids = {host["id"] for host in self.hosts}
             for host_id in host_ids:
@@ -451,6 +459,7 @@ class MonitorApp:
             )
 
     def _health_loop(self) -> None:
+        """Run lightweight all-host connectivity checks every 30 seconds."""
         while not self.stop.is_set():
             try:
                 self.check_host_health()
@@ -476,6 +485,7 @@ class MonitorApp:
         }
 
     def host_status_list(self) -> list[dict[str, Any]]:
+        """Return all lightweight Tab-dot states from memory without probing SSH."""
         with self.lock:
             host_ids = [host["id"] for host in self.hosts]
         current = now_ms()
@@ -639,12 +649,14 @@ class MonitorApp:
 
     @staticmethod
     def _endpoint_host(value: str) -> str:
+        """Extract a host from IPv4/hostname or bracketed IPv6 endpoint text."""
         if value.startswith("[") and "]" in value:
             return value[1:value.index("]")]
         return value.rsplit(":", 1)[0] if ":" in value else value
 
     @staticmethod
     def _loopback_address(value: str) -> bool:
+        """Recognize loopback names and addresses, including bracketed IPv6."""
         if value.lower() == "localhost":
             return True
         try:
@@ -714,6 +726,7 @@ class MonitorApp:
         return [self._host_info(host, data, resolve_tunnel=False) for host, data in pairs]
 
     def snapshot_list(self) -> list[dict[str, Any]]:
+        """Return only snapshots already present in memory; never collect here."""
         with self.lock:
             pairs = [(dict(host), dict(data)) for host in self.hosts
                      if (data := self.data.get(host["id"])) is not None]
@@ -731,6 +744,7 @@ class MonitorApp:
 
     def _host_info(self, host: dict[str, Any], data: dict[str, Any],
                    resolve_tunnel: bool = True) -> dict[str, Any]:
+        """Merge safe host metadata, cached resource status, and display address."""
         collection_status = data.get("status", "warning")
         connectivity_status = self._host_health_info(host["id"])["status"]
         tunnel_peer = self._tunnel_peer_address(host) if resolve_tunnel else None
@@ -756,6 +770,7 @@ class MonitorApp:
     def _host_change_result(self, host: dict[str, Any],
                             snapshot: dict[str, Any],
                             resolve_tunnel: bool = True) -> dict[str, Any]:
+        """Build the common add/edit/snapshot response shape consumed by the UI."""
         return {
             "id": host["id"], "name": host["name"], "status": snapshot["status"],
             "host": self._host_info(host, snapshot, resolve_tunnel),
@@ -911,6 +926,7 @@ class MonitorApp:
     @staticmethod
     def _directory_item(path: str, size: int, depth: int, total: int,
                         delete_enabled: bool, delete_min_depth: int) -> dict[str, Any]:
+        """Build one direct-child row with depth and clear eligibility."""
         return {
             "name": posixpath.basename(path.rstrip("/")) or "/",
             "path": path, "size_bytes": size, "depth": depth,
@@ -921,6 +937,7 @@ class MonitorApp:
 
     @staticmethod
     def _parse_du(output: bytes, target: str) -> list[tuple[str, int]]:
+        """Parse NUL-delimited byte counts without breaking paths containing spaces."""
         entries: list[tuple[str, int]] = []
         for record in output.split(b"\0"):
             if not record or b"\t" not in record:
@@ -975,6 +992,7 @@ class MonitorApp:
     @staticmethod
     def _ssh_command(host: dict[str, Any], command: str, timeout: float = 30
                      ) -> subprocess.CompletedProcess[bytes]:
+        """Run one fixed server-built shell command through non-interactive SSH."""
         destination = f'{host.get("user", "") + "@" if host.get("user") else ""}{host["address"]}'
         return subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-p",
@@ -1011,6 +1029,7 @@ class MonitorApp:
         warning = None
 
         def children_from_entries(sort: bool = True) -> list[dict[str, Any]]:
+            """Convert completed byte counts into stable API directory rows."""
             children = [
                 self._directory_item(item_path, size, depth + 1, total,
                                      self.config.allow_delete,
@@ -1038,6 +1057,7 @@ class MonitorApp:
                 ]
 
             def local_size(directory: Path) -> tuple[str, int] | None:
+                """Measure one local direct child without crossing filesystems."""
                 result = subprocess.run(
                     ["du", "-0", "-x", "-B1", "-s", "--", str(directory)],
                     capture_output=True, timeout=300,
@@ -1188,6 +1208,7 @@ class MonitorApp:
         removed = 0
 
         def remove_entry(path: Path) -> None:
+            """Recursively remove one descendant while refusing child mounts."""
             nonlocal removed
             metadata = path.lstat()
             if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
@@ -1293,6 +1314,7 @@ class MonitorApp:
         self._invalidate_snapshot(host_id)
 
         def collect() -> None:
+            """Perform the delayed refresh unless shutdown or deletion wins."""
             if self.stop.wait(0.35):
                 return
             try:
@@ -1336,6 +1358,7 @@ def make_handler(app: MonitorApp):
         server_version = "Monitor/1.0"
 
         def log_message(self, fmt: str, *args: Any) -> None:
+            """Keep access logging compact and compatible with terminal startup."""
             print(f"{self.address_string()} - {fmt % args}")
 
         def authenticated(self) -> bool:
@@ -1371,6 +1394,7 @@ def make_handler(app: MonitorApp):
             self.wfile.write(body)
 
         def body(self) -> dict[str, Any]:
+            """Decode one small JSON request body."""
             length = int(self.headers.get("Content-Length", "0"))
             return json.loads(self.rfile.read(length) or b"{}")
 
@@ -1551,6 +1575,7 @@ def parse_args() -> argparse.Namespace:
     """Parse the deliberately small deployment and capability surface."""
 
     def delete_depth(value: str) -> int:
+        """Parse and validate the optional `--allow-delete` depth value."""
         try:
             depth = int(value)
         except ValueError:
