@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal multi-host process monitor using only the Python standard library.
+"""仅使用 Python 标准库实现的极简多机进程监视器。
 
 设计约束：
 - 单进程同时提供页面、API、内存缓存和后台健康检查。
@@ -43,18 +43,18 @@ HOST_STATUS_MAX_WORKERS = 8
 
 
 def now_ms() -> int:
-    """Return the current Unix timestamp in milliseconds for API payloads."""
+    """返回供 API 使用的当前 Unix 毫秒时间戳。"""
     return int(time.time() * 1000)
 
 
 def safe_id(value: str) -> str:
-    """Convert a host label into a stable URL- and filename-safe identifier."""
+    """将机器标签转换为可安全用于 URL 和文件名的稳定标识。"""
     value = re.sub(r"[^a-zA-Z0-9_.-]+", "-", value.strip()).strip("-")
     return value or "host"
 
 
 def parse_ps(text: str) -> list[dict[str, Any]]:
-    """Parse the fixed `ps -eo` columns and resolve parent process names."""
+    """解析固定的 `ps -eo` 列，并补全父进程名称。"""
     rows: list[dict[str, Any]] = []
     for line in text.splitlines():
         parts = line.split(None, 10)
@@ -78,7 +78,7 @@ def parse_ps(text: str) -> list[dict[str, Any]]:
 
 
 def parse_df(text: str) -> list[dict[str, Any]]:
-    """Parse byte-based `df -PT -B1` output into mount summaries."""
+    """将按字节输出的 `df -PT -B1` 解析为挂载点摘要。"""
     rows: list[dict[str, Any]] = []
     for line in text.splitlines():
         parts = line.split()
@@ -94,7 +94,7 @@ def parse_df(text: str) -> list[dict[str, Any]]:
 
 
 def read_local_snapshot() -> dict[str, Any]:
-    """Collect the same snapshot locally that `_read_ssh` collects remotely."""
+    """在本机采集与 `_read_ssh` 远程采集结构一致的快照。"""
     ps = subprocess.run(
         ["ps", "-eo", "pid=,ppid=,user=,comm=,nlwp=,pcpu=,rss=,pmem=,lstart="],
         capture_output=True, text=True, check=True, timeout=8,
@@ -160,7 +160,7 @@ DEMO_DIRECTORY_TREE: dict[str, list[tuple[str, int]]] = {
 
 
 def demo_snapshot(host_index: int, tick: int) -> dict[str, Any]:
-    """Generate deterministic but changing process data for demo mode."""
+    """为演示模式生成可重复但会随轮次变化的进程数据。"""
     rng = random.Random(host_index * 100003 + tick)
     processes = []
     base_pid = 1100 + host_index * 1000
@@ -198,7 +198,7 @@ def demo_snapshot(host_index: int, tick: int) -> dict[str, Any]:
 
 @dataclass
 class Config:
-    """Validated process-wide settings derived from CLI flags and environment."""
+    """保存由命令行参数和环境变量生成的进程级配置。"""
 
     bind: str
     port: int
@@ -211,33 +211,33 @@ class Config:
     delete_min_depth: int = 3
 
     def __post_init__(self) -> None:
-        """Enforce the minimum safe depth for directory clearing."""
+        """强制目录清空功能的最小安全层级。"""
         if self.delete_min_depth < 3:
             raise ValueError("目录清空层级必须至少为 3")
 
 
 class MonitorApp:
-    """Own all mutable host state, caches, collectors, and dangerous operations."""
+    """集中管理机器状态、内存缓存、采集器和危险操作。"""
 
     def __init__(self, config: Config, hosts_path: Path | None):
-        """Initialize persistent host metadata and all process-local state."""
+        """初始化持久化机器元数据和全部进程内状态。"""
         self.config = config
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.tick = 0
-        # Demo mutations intentionally live only for this process lifetime.
+        # 演示模式的操作结果只在本次进程生命周期内有效。
         self.demo_cleared_directories: set[tuple[str, str]] = set()
         self.demo_terminated_processes: set[tuple[str, int]] = set()
-        # Directory results are KV cached by (host, mount, path). Jobs prevent
-        # identical clicks from launching duplicate `du` traversals.
+        # 目录结果按（机器、挂载点、路径）组成 KV 缓存；后台任务表避免
+        # 相同点击重复启动 `du` 遍历。
         self.directory_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
         self.directory_jobs: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.directory_generation: dict[str, int] = {}
-        # Connectivity and tunnel identity are independent from resource status.
+        # SSH 连通状态和隧道对端信息与资源采集状态相互独立。
         self.tunnel_peer_cache: dict[tuple[str, int], tuple[float, str | None]] = {}
         self.host_health: dict[str, dict[str, Any]] = {}
-        # Resource snapshots use monotonic TTLs, per-host generations, and
-        # per-host locks to implement request-driven single-flight collection.
+        # 资源快照使用单调时钟、机器代次和每机锁，实现按请求触发的
+        # single-flight 合并采集。
         self.snapshot_collected_at: dict[str, float] = {}
         self.snapshot_generation: dict[str, int] = {}
         self.snapshot_locks: dict[str, threading.Lock] = {}
@@ -253,7 +253,7 @@ class MonitorApp:
         self.health_thread: threading.Thread | None = None
 
     def _load_hosts(self, path: Path) -> list[dict[str, Any]]:
-        """Load demo hosts, persisted hosts, or the safe local default."""
+        """加载演示机器、持久化机器或安全的本机默认配置。"""
         if self.config.demo:
             names = ["开发机", "生产服务器", "数据库", "备份机"]
             return [{"id": f"demo-{i + 1}", "name": name, "address": "demo", "port": 22}
@@ -266,7 +266,7 @@ class MonitorApp:
                  "local": True}]
 
     def _persist_hosts(self) -> None:
-        """Atomically replace the host JSON so a failed write cannot truncate it."""
+        """原子替换机器 JSON，避免写入失败破坏原配置。"""
         if self.config.demo:
             return
         allowed = ("id", "name", "address", "user", "port", "local")
@@ -278,7 +278,7 @@ class MonitorApp:
 
     def _normalize_host(self, values: dict[str, Any], current: dict[str, Any] | None = None
                         ) -> dict[str, Any]:
-        """Merge and validate fields accepted from the host management form."""
+        """合并并校验机器管理表单允许提交的字段。"""
         host = dict(current or {})
         name = str(values.get("name", host.get("name", ""))).strip()
         address = str(values.get("address", host.get("address", ""))).strip()
@@ -310,7 +310,7 @@ class MonitorApp:
         return host
 
     def start(self) -> None:
-        """Start cache maintenance and the independent SSH health loop."""
+        """启动缓存维护线程和独立的 SSH 健康检查线程。"""
         self.thread = threading.Thread(target=self._loop, daemon=True, name="maintenance")
         self.thread.start()
         self.health_thread = threading.Thread(
@@ -319,12 +319,12 @@ class MonitorApp:
         self.health_thread.start()
 
     def _loop(self) -> None:
-        """Periodically prune only caches that have a strict ten-minute TTL."""
+        """周期清理具有严格 10 分钟 TTL 的内存缓存。"""
         while not self.stop.wait(min(60, max(1, self.config.interval))):
             self._prune_memory_caches()
 
     def close(self) -> None:
-        """Signal background loops and wait briefly for a clean shutdown."""
+        """通知后台循环退出，并短暂等待线程完成清理。"""
         self.stop.set()
         if self.thread:
             self.thread.join(timeout=2)
@@ -332,7 +332,7 @@ class MonitorApp:
             self.health_thread.join(timeout=6)
 
     def _prune_memory_caches(self) -> None:
-        """Drop expired directory and tunnel results; resource snapshots persist."""
+        """删除过期目录和隧道结果；资源快照继续保留最后值。"""
         now = time.monotonic()
         with self.lock:
             self.directory_cache = {
@@ -345,7 +345,7 @@ class MonitorApp:
             }
 
     def _probe_host(self, host: dict[str, Any]) -> tuple[bool, str | None]:
-        """Run only `ssh ... true`; this never collects resource information."""
+        """只执行 `ssh ... true`，不采集任何资源信息。"""
         if self.config.demo:
             reachable = host["id"] != "demo-4"
             return reachable, None if reachable else "模拟 SSH 连接失败"
@@ -366,7 +366,7 @@ class MonitorApp:
         return False, detail[-1] if detail else "SSH 连接失败"
 
     def _mark_health_checking(self, host_ids: list[str]) -> None:
-        """Mark selected host dots as being checked without discarding last state."""
+        """将指定机器标记为检测中，同时保留上一次状态。"""
         with self.lock:
             current_ids = {host["id"] for host in self.hosts}
             for host_id in host_ids:
@@ -386,7 +386,7 @@ class MonitorApp:
         self, host_id: str, reachable: bool, error: str | None = None,
         expected_host: dict[str, Any] | None = None,
     ) -> str:
-        """Apply green/yellow/red health transitions without accepting stale probes."""
+        """更新绿、黄、红状态，同时拒绝旧连接参数产生的迟到结果。"""
         with self.lock:
             current_host = next(
                 (host for host in self.hosts if host["id"] == host_id), None
@@ -401,7 +401,7 @@ class MonitorApp:
                 return "warning"
             previous = self.host_health.get(host_id, {})
             failures = 0 if reachable else int(previous.get("failures", 0)) + 1
-            # The first failure is yellow until the short retry also fails.
+            # 首次失败先显示黄色，短暂复查仍失败后才转为红色。
             status = "normal" if reachable else ("warning" if failures == 1 else "offline")
             self.host_health[host_id] = {
                 "status": status,
@@ -415,7 +415,7 @@ class MonitorApp:
     def _health_probe_batch(
         self, hosts: list[dict[str, Any]]
     ) -> list[tuple[dict[str, Any], bool, str | None]]:
-        """Probe a bounded batch so 10 hosts cannot create unbounded SSH fan-out."""
+        """按限定并发数批量检测，避免机器增加时无限创建 SSH。"""
         if not hosts:
             return []
         results: list[tuple[dict[str, Any], bool, str | None]] = []
@@ -434,7 +434,7 @@ class MonitorApp:
         return results
 
     def check_host_health(self) -> None:
-        """Probe all configured hosts and retry first failures once after 3 seconds."""
+        """检测全部机器，并在首次失败 3 秒后复查一次。"""
         with self.lock:
             hosts = [dict(host) for host in self.hosts]
         self._mark_health_checking([host["id"] for host in hosts])
@@ -459,7 +459,7 @@ class MonitorApp:
             )
 
     def _health_loop(self) -> None:
-        """Run lightweight all-host connectivity checks every 30 seconds."""
+        """每 30 秒执行一次全部机器的轻量连通检查。"""
         while not self.stop.is_set():
             try:
                 self.check_host_health()
@@ -469,7 +469,7 @@ class MonitorApp:
                 return
 
     def _host_health_info(self, host_id: str, now: int | None = None) -> dict[str, Any]:
-        """Derive the public Tab-dot state from the latest lightweight probe."""
+        """根据最近一次轻量检测生成机器 Tab 状态点数据。"""
         with self.lock:
             cached = dict(self.host_health.get(host_id, {}))
         checked_at = cached.get("checked_at")
@@ -485,20 +485,19 @@ class MonitorApp:
         }
 
     def host_status_list(self) -> list[dict[str, Any]]:
-        """Return all lightweight Tab-dot states from memory without probing SSH."""
+        """从内存返回全部 Tab 状态点，不在接口请求中执行 SSH。"""
         with self.lock:
             host_ids = [host["id"] for host in self.hosts]
         current = now_ms()
         return [self._host_health_info(host_id, current) for host_id in host_ids]
 
     def collect_host(self, host_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Return a fresh-enough shared snapshot, collecting at most once per host.
+        """返回有效期内的共享快照，并保证同一机器最多采集一次。
 
-        The cache is checked before and after taking the per-host lock. This
-        double-check is the single-flight boundary: one expired request performs
-        the work, while concurrent requests wait and then reuse its result.
-        Generations prevent results started before a kill, clear, edit, or delete
-        from overwriting the newer state.
+        获取每机锁前后都会检查缓存。这个二次检查构成 single-flight
+        边界：快照过期后的第一个请求负责采集，并发请求等待并复用结果。
+        机器代次用于阻止终止进程、清空目录、编辑或删除之前启动的旧采集
+        覆盖新状态。
         """
         while True:
             with self.lock:
@@ -522,8 +521,8 @@ class MonitorApp:
                 )
 
             with collection_lock:
-                # Another request may have refreshed the host while this request
-                # waited for the collection lock, so freshness must be rechecked.
+                # 等待采集锁期间，其他请求可能已经刷新完成，因此必须
+                # 在锁内再次检查有效期。
                 with self.lock:
                     item = next(
                         ((index, dict(host)) for index, host in enumerate(self.hosts)
@@ -564,11 +563,11 @@ class MonitorApp:
                         self.data[host_id] = snapshot
                         self.snapshot_collected_at[host_id] = time.monotonic()
                         return current, dict(snapshot)
-            # The host was changed or invalidated while collection was running.
-            # Retry after releasing the per-host lock; the stale result is discarded.
+            # 采集期间机器连接被修改或快照被主动失效：丢弃旧结果，
+            # 释放每机锁后重新采集。
 
     def _invalidate_snapshot(self, host_id: str) -> None:
-        """Expire a snapshot and invalidate any collector already in flight."""
+        """立即让快照过期，并使已经在途的采集结果失效。"""
         with self.lock:
             self.snapshot_generation[host_id] = (
                 self.snapshot_generation.get(host_id, 0) + 1
@@ -576,18 +575,18 @@ class MonitorApp:
             self.snapshot_collected_at.pop(host_id, None)
 
     def _refresh_host(self, host: dict[str, Any], index: int) -> tuple[str, dict[str, Any]]:
-        """Collect without raising connectivity errors to HTTP callers."""
+        """执行采集，并将连接异常转换为可返回的离线快照。"""
         try:
             snapshot = self._collect_host(host, index)
         except Exception as exc:
             with self.lock:
                 previous = self.data.get(host["id"], {"processes": [], "filesystems": [], "summary": {}})
-            # Preserve the last useful values while exposing the failed status.
+            # 采集失败时保留最后一份有效数据，只更新状态、时间和错误信息。
             snapshot = {**previous, "status": "offline", "updated_at": now_ms(), "error": str(exc)}
         return host["id"], snapshot
 
     def _collect_host(self, host: dict[str, Any], index: int = 0) -> dict[str, Any]:
-        """Dispatch one real or demo collection without applying cache policy."""
+        """执行一次真实或演示采集，不在此处应用缓存策略。"""
         if self.config.demo:
             snapshot = demo_snapshot(index, self.tick)
             removed = {
@@ -609,10 +608,10 @@ class MonitorApp:
         return snapshot
 
     def _read_ssh(self, host: dict[str, Any]) -> dict[str, Any]:
-        """Collect processes, mounts, load, memory, and HOME in one SSH round trip."""
+        """通过一次 SSH 往返采集进程、挂载点、负载、内存和 HOME。"""
         destination = f'{host.get("user", "") + "@" if host.get("user") else ""}{host["address"]}'
-        # Section markers keep the remote side dependency-free while allowing one
-        # SSH process to return all parts of the snapshot consistently.
+        # 使用分段标记让远程端无需额外依赖，同时用一个 SSH 进程
+        # 一致地返回快照的全部组成部分。
         command = (
             "printf '__PS__\\n'; ps -eo pid=,ppid=,user=,comm=,nlwp=,pcpu=,rss=,pmem=,lstart=; "
             "printf '__DF__\\n'; df -PT -B1 --exclude-type=tmpfs --exclude-type=devtmpfs; "
@@ -649,14 +648,14 @@ class MonitorApp:
 
     @staticmethod
     def _endpoint_host(value: str) -> str:
-        """Extract a host from IPv4/hostname or bracketed IPv6 endpoint text."""
+        """从 IPv4、主机名或带方括号的 IPv6 端点中提取主机部分。"""
         if value.startswith("[") and "]" in value:
             return value[1:value.index("]")]
         return value.rsplit(":", 1)[0] if ":" in value else value
 
     @staticmethod
     def _loopback_address(value: str) -> bool:
-        """Recognize loopback names and addresses, including bracketed IPv6."""
+        """识别回环主机名和地址，包括带方括号的 IPv6。"""
         if value.lower() == "localhost":
             return True
         try:
@@ -665,11 +664,10 @@ class MonitorApp:
             return False
 
     def _tunnel_peer_address(self, host: dict[str, Any]) -> str | None:
-        """Resolve a reverse-tunnel listener to its public SSH peer when possible.
+        """尽可能将反向隧道监听端解析为公网 SSH 对端。
 
-        Normal remote addresses are returned untouched. Only non-local hosts that
-        point at loopback are candidates, which avoids changing ordinary SSH
-        display semantics.
+        普通远程地址保持不变。只有指向回环地址且标记为非本机的机器
+        才参与识别，避免影响正常 SSH 地址的展示逻辑。
         """
         address = str(host.get("address", ""))
         if host.get("local") or not self._loopback_address(address):
@@ -719,14 +717,14 @@ class MonitorApp:
         return peer
 
     def host_list(self) -> list[dict[str, Any]]:
-        """Return host metadata and cached summaries without triggering collection."""
+        """返回机器元数据和缓存摘要，不触发资源采集。"""
         with self.lock:
             pairs = [(dict(host), dict(self.data.get(host["id"], {})))
                      for host in self.hosts]
         return [self._host_info(host, data, resolve_tunnel=False) for host, data in pairs]
 
     def snapshot_list(self) -> list[dict[str, Any]]:
-        """Return only snapshots already present in memory; never collect here."""
+        """只返回内存中已有的快照，不在此处触发采集。"""
         with self.lock:
             pairs = [(dict(host), dict(data)) for host in self.hosts
                      if (data := self.data.get(host["id"])) is not None]
@@ -744,7 +742,7 @@ class MonitorApp:
 
     def _host_info(self, host: dict[str, Any], data: dict[str, Any],
                    resolve_tunnel: bool = True) -> dict[str, Any]:
-        """Merge safe host metadata, cached resource status, and display address."""
+        """合并安全机器元数据、缓存资源状态和页面展示地址。"""
         collection_status = data.get("status", "warning")
         connectivity_status = self._host_health_info(host["id"])["status"]
         tunnel_peer = self._tunnel_peer_address(host) if resolve_tunnel else None
@@ -770,7 +768,7 @@ class MonitorApp:
     def _host_change_result(self, host: dict[str, Any],
                             snapshot: dict[str, Any],
                             resolve_tunnel: bool = True) -> dict[str, Any]:
-        """Build the common add/edit/snapshot response shape consumed by the UI."""
+        """构造前端统一使用的新增、编辑和快照响应结构。"""
         return {
             "id": host["id"], "name": host["name"], "status": snapshot["status"],
             "host": self._host_info(host, snapshot, resolve_tunnel),
@@ -784,7 +782,7 @@ class MonitorApp:
 
     def get_host(self, host_id: str, collect_if_missing: bool = False
                  ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Read host state and optionally collect only when no snapshot exists."""
+        """读取机器状态，并可在快照不存在时执行一次采集。"""
         with self.lock:
             host = next((h for h in self.hosts if h["id"] == host_id), None)
             data = self.data.get(host_id)
@@ -797,7 +795,7 @@ class MonitorApp:
         raise KeyError(host_id)
 
     def add_host(self, values: dict[str, Any]) -> dict[str, Any]:
-        """Validate connectivity before persisting a new host."""
+        """验证连接成功后再持久化新增机器。"""
         host = self._normalize_host(values)
         with self.lock:
             base = safe_id(str(values.get("id") or host["name"] or host["address"]))
@@ -824,7 +822,7 @@ class MonitorApp:
         return self._host_change_result(host, snapshot)
 
     def update_host(self, host_id: str, values: dict[str, Any]) -> dict[str, Any]:
-        """Update a host, testing changed SSH coordinates before committing them."""
+        """更新机器，并在提交前验证发生变化的 SSH 连接信息。"""
         with self.lock:
             index = next((i for i, host in enumerate(self.hosts) if host["id"] == host_id), None)
             if index is None:
@@ -835,8 +833,8 @@ class MonitorApp:
                                  for key in ("address", "user", "port"))
         snapshot = None
         if connection_changed:
-            # A failed test leaves both the JSON file and current in-memory host
-            # untouched, so editing a connection cannot break a working entry.
+            # 连接测试失败时不修改 JSON 和内存中的当前机器，避免一次
+            # 错误编辑破坏原本可用的配置。
             try:
                 snapshot = self._collect_host(updated, index)
             except Exception as exc:
@@ -878,7 +876,7 @@ class MonitorApp:
         )
 
     def test_host(self, values: dict[str, Any]) -> dict[str, Any]:
-        """Test form values with a real snapshot without saving any configuration."""
+        """用真实快照测试表单连接信息，但不保存任何配置。"""
         host_id = str(values.get("id", "")).strip()
         with self.lock:
             current = next((dict(host) for host in self.hosts if host["id"] == host_id), None)
@@ -898,7 +896,7 @@ class MonitorApp:
 
     def _validate_directory(self, host_id: str, mount: str, path: str
                             ) -> tuple[dict[str, Any], str, str, int, int]:
-        """Normalize a requested path and prove it remains inside its mount."""
+        """规范化请求路径，并验证它始终位于指定挂载点内。"""
         host, data = self.get_host(host_id, collect_if_missing=True)
         if "\0" in mount or "\0" in path:
             raise ValueError("目录路径不正确")
@@ -913,8 +911,7 @@ class MonitorApp:
         if filesystem is None:
             raise ValueError("挂载点不存在或尚未采集")
         try:
-            # A path-component comparison prevents `/data-old` from being
-            # mistaken for a child of `/data`.
+            # 按路径组件比较，避免把 `/data-old` 误判成 `/data` 的子目录。
             if posixpath.commonpath([mount, path]) != mount:
                 raise ValueError("目录不属于指定挂载点")
         except ValueError:
@@ -926,7 +923,7 @@ class MonitorApp:
     @staticmethod
     def _directory_item(path: str, size: int, depth: int, total: int,
                         delete_enabled: bool, delete_min_depth: int) -> dict[str, Any]:
-        """Build one direct-child row with depth and clear eligibility."""
+        """构造包含层级和清空资格的一级子目录数据行。"""
         return {
             "name": posixpath.basename(path.rstrip("/")) or "/",
             "path": path, "size_bytes": size, "depth": depth,
@@ -937,7 +934,7 @@ class MonitorApp:
 
     @staticmethod
     def _parse_du(output: bytes, target: str) -> list[tuple[str, int]]:
-        """Parse NUL-delimited byte counts without breaking paths containing spaces."""
+        """解析 NUL 分隔的字节统计，正确处理包含空格的路径。"""
         entries: list[tuple[str, int]] = []
         for record in output.split(b"\0"):
             if not record or b"\t" not in record:
@@ -956,7 +953,7 @@ class MonitorApp:
     def _remote_directory_error(
         stderr: bytes, path: str, returncode: int
     ) -> tuple[str, int]:
-        """Turn remote shell and `du` failures into specific UI messages."""
+        """将远程 Shell 和 `du` 错误转换为明确的页面提示。"""
         text = os.fsdecode(stderr).strip()
         matches: list[tuple[str, str]] = []
         seen: set[tuple[str, str]] = set()
@@ -992,7 +989,7 @@ class MonitorApp:
     @staticmethod
     def _ssh_command(host: dict[str, Any], command: str, timeout: float = 30
                      ) -> subprocess.CompletedProcess[bytes]:
-        """Run one fixed server-built shell command through non-interactive SSH."""
+        """通过非交互 SSH 执行一条由服务端固定构造的命令。"""
         destination = f'{host.get("user", "") + "@" if host.get("user") else ""}{host["address"]}'
         return subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-p",
@@ -1001,7 +998,7 @@ class MonitorApp:
         )
 
     def _resolved_local_directory(self, mount: str, path: str) -> Path:
-        """Resolve symlinks and enforce the mount boundary for local operations."""
+        """解析本机符号链接，并强制目录操作不越过挂载点边界。"""
         try:
             resolved_mount = Path(mount).resolve(strict=True)
             resolved_path = Path(path).resolve(strict=True)
@@ -1017,19 +1014,18 @@ class MonitorApp:
         return resolved_path
 
     def _scan_directories(self, host_id: str, mount: str, path: str) -> dict[str, Any]:
-        """Measure only the direct child directories of one expanded tree node.
+        """只统计一个已展开树节点的一级子目录。
 
-        `du -x` prevents traversal into child mounts. Local children use at most
-        four workers; remote children use `xargs -P 4` inside one SSH session.
-        Results are sorted only after every worker completes so rows do not jump
-        while the user is reading them.
+        `du -x` 防止进入子挂载点。本机最多使用 4 个工作线程；远程机器
+        在一个 SSH 会话内使用 `xargs -P 4`。全部任务完成后再统一排序，
+        避免用户阅读时数据行持续跳动。
         """
         host, mount, path, depth, total = self._validate_directory(host_id, mount, path)
         entries: list[tuple[str, int]] = []
         warning = None
 
         def children_from_entries(sort: bool = True) -> list[dict[str, Any]]:
-            """Convert completed byte counts into stable API directory rows."""
+            """将已完成的字节统计转换为稳定的 API 目录行。"""
             children = [
                 self._directory_item(item_path, size, depth + 1, total,
                                      self.config.allow_delete,
@@ -1057,7 +1053,7 @@ class MonitorApp:
                 ]
 
             def local_size(directory: Path) -> tuple[str, int] | None:
-                """Measure one local direct child without crossing filesystems."""
+                """统计一个本机一级子目录，并禁止跨文件系统。"""
                 result = subprocess.run(
                     ["du", "-0", "-x", "-B1", "-s", "--", str(directory)],
                     capture_output=True, timeout=300,
@@ -1071,8 +1067,8 @@ class MonitorApp:
                 return None
 
             errors: list[str] = []
-            # Each worker owns one disjoint direct child. Four workers balance
-            # latency against metadata I/O pressure on the monitored disk.
+            # 每个线程只负责一个互不重叠的一级子目录；4 个线程用于平衡
+            # 等待时间和被监控磁盘的元数据 I/O 压力。
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=min(4, max(1, len(directories))),
                 thread_name_prefix="du",
@@ -1089,8 +1085,8 @@ class MonitorApp:
                 raise OSError(errors[0])
         else:
             root_q, target_q = shlex.quote(mount), shlex.quote(path)
-            # Canonicalize and check boundaries remotely before `find`; every
-            # user-derived shell argument above is protected by shlex.quote.
+            # 远程执行 `find` 前先解析真实路径并检查边界；所有来自用户
+            # 输入的 Shell 参数均由 shlex.quote 保护。
             command = (
                 f"root=$(readlink -f -- {root_q}) || exit 20; "
                 f"target=$(readlink -f -- {target_q}) || exit 21; "
@@ -1129,7 +1125,7 @@ class MonitorApp:
         return result
 
     def list_directories(self, host_id: str, mount: str, path: str) -> dict[str, Any]:
-        """Return a cached directory level or start one shared background job."""
+        """返回缓存的目录层级，未命中时启动一个共享后台任务。"""
         host, mount, path, depth, _ = self._validate_directory(host_id, mount, path)
         if self.config.demo:
             return self._scan_directories(host_id, mount, path)
@@ -1150,7 +1146,7 @@ class MonitorApp:
                 }
 
                 def scan() -> None:
-                    """Publish this KV job only if its host generation is current."""
+                    """仅在机器代次仍有效时发布当前 KV 任务结果。"""
                     try:
                         result = self._scan_directories(host_id, mount, path)
                     except subprocess.TimeoutExpired:
@@ -1191,7 +1187,7 @@ class MonitorApp:
         }
 
     def _invalidate_directory_cache(self, host_id: str) -> None:
-        """Invalidate every directory result and in-flight job for one host."""
+        """使一台机器的全部目录结果和在途任务失效。"""
         with self.lock:
             self.directory_generation[host_id] = self.directory_generation.get(host_id, 0) + 1
             self.directory_cache = {
@@ -1203,12 +1199,12 @@ class MonitorApp:
 
     @staticmethod
     def _clear_local_contents(target: Path) -> int:
-        """Remove descendants on the same device while preserving `target` itself."""
+        """删除同一设备上的全部后代，同时保留目标目录本身。"""
         root_device = target.stat().st_dev
         removed = 0
 
         def remove_entry(path: Path) -> None:
-            """Recursively remove one descendant while refusing child mounts."""
+            """递归删除一个后代节点，同时拒绝进入子挂载点。"""
             nonlocal removed
             metadata = path.lstat()
             if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
@@ -1228,7 +1224,7 @@ class MonitorApp:
         return removed
 
     def clear_directory(self, host_id: str, mount: str, path: str) -> dict[str, Any]:
-        """Clear an eligible directory after repeating all server-side safeguards."""
+        """再次执行服务端安全校验后，清空符合条件的目录。"""
         if not self.config.allow_delete:
             raise PermissionError("未启用清空目录功能，请使用 --allow-delete 启动")
         host, mount, path, depth, _ = self._validate_directory(host_id, mount, path)
@@ -1249,7 +1245,7 @@ class MonitorApp:
                 f"target=$(readlink -f -- {target_q}) || exit 21; "
                 '[ -d "$target" ] || exit 22; '
                 'if [ "$root" != "/" ]; then case "$target" in "$root"|"$root"/*) ;; *) exit 23;; esac; fi; '
-                # `-mindepth 1` is the invariant that preserves the target itself.
+                # `-mindepth 1` 是保留目标目录本身的关键约束。
                 'find "$target" -xdev -mindepth 1 -depth -print0 -delete'
             )
             result = self._ssh_command(host, command, timeout=60)
@@ -1263,7 +1259,7 @@ class MonitorApp:
         return {"ok": True, "path": path, "removed": removed, "cleared_at": now_ms()}
 
     def delete_host(self, host_id: str) -> None:
-        """Atomically remove a host while keeping at least one configured machine."""
+        """原子删除一台机器，同时保证配置中至少保留一台。"""
         with self.lock:
             index = next((i for i, host in enumerate(self.hosts) if host["id"] == host_id), None)
             if index is None:
@@ -1290,7 +1286,7 @@ class MonitorApp:
         self._invalidate_directory_cache(host_id)
 
     def _remove_cached_process(self, host_id: str, pid: int) -> bool:
-        """Optimistically remove a terminated PID from the visible snapshot."""
+        """从当前可见快照中乐观移除已经终止的 PID。"""
         with self.lock:
             data = self.data.get(host_id)
             if not data:
@@ -1310,11 +1306,11 @@ class MonitorApp:
             return True
 
     def _refresh_host_soon(self, host_id: str) -> None:
-        """Invalidate now and collect shortly after the remote state can settle."""
+        """立即使快照失效，稍等远程状态稳定后重新采集。"""
         self._invalidate_snapshot(host_id)
 
         def collect() -> None:
-            """Perform the delayed refresh unless shutdown or deletion wins."""
+            """在服务未关闭且机器未删除时执行延迟刷新。"""
             if self.stop.wait(0.35):
                 return
             try:
@@ -1327,7 +1323,7 @@ class MonitorApp:
         ).start()
 
     def terminate(self, host_id: str, pid: int) -> None:
-        """Send SIGTERM after enforcing the explicit feature and PID safeguards."""
+        """通过功能开关和 PID 安全校验后发送 SIGTERM。"""
         if not self.config.allow_kill:
             raise PermissionError("未启用结束进程功能")
         if pid <= 1 or pid == os.getpid():
@@ -1350,19 +1346,19 @@ class MonitorApp:
 
 
 def make_handler(app: MonitorApp):
-    """Bind one MonitorApp to the standard-library threaded HTTP handler."""
+    """将一个 MonitorApp 实例绑定到标准库多线程 HTTP 处理器。"""
 
     class Handler(BaseHTTPRequestHandler):
-        """Serve the single-page UI and its JSON API with optional Basic Auth."""
+        """提供单页面、JSON API 和可选的 Basic Auth 验证。"""
 
         server_version = "Monitor/1.0"
 
         def log_message(self, fmt: str, *args: Any) -> None:
-            """Keep access logging compact and compatible with terminal startup."""
+            """输出适合终端直接启动场景的紧凑访问日志。"""
             print(f"{self.address_string()} - {fmt % args}")
 
         def authenticated(self) -> bool:
-            """Challenge every page and API request when credentials are configured."""
+            """配置账号后，对每个页面和 API 请求执行身份验证。"""
             if not app.config.username:
                 return True
             expected = base64.b64encode(
@@ -1376,7 +1372,7 @@ def make_handler(app: MonitorApp):
             return False
 
         def send_json(self, value: Any, status: int = 200) -> None:
-            """Serialize compact JSON and gzip process-heavy responses when accepted."""
+            """序列化紧凑 JSON，并在浏览器支持时压缩较大的响应。"""
             body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
             compressed = len(body) >= 1024 and "gzip" in self.headers.get(
                 "Accept-Encoding", ""
@@ -1394,12 +1390,12 @@ def make_handler(app: MonitorApp):
             self.wfile.write(body)
 
         def body(self) -> dict[str, Any]:
-            """Decode one small JSON request body."""
+            """解码一个小型 JSON 请求体。"""
             length = int(self.headers.get("Content-Length", "0"))
             return json.loads(self.rfile.read(length) or b"{}")
 
         def do_GET(self) -> None:
-            """Serve reads; metadata/health endpoints never trigger collection."""
+            """处理读取请求；元数据和健康接口不会触发资源采集。"""
             if not self.authenticated():
                 return
             parsed = urllib.parse.urlparse(self.path)
@@ -1480,7 +1476,7 @@ def make_handler(app: MonitorApp):
             self.send_json({"error": "接口不存在"}, 404)
 
         def do_PATCH(self) -> None:
-            """Edit one host after connection validation."""
+            """验证连接后编辑一台机器。"""
             if not self.authenticated():
                 return
             match = re.fullmatch(r"/api/hosts/([^/]+)", urllib.parse.urlparse(self.path).path)
@@ -1498,7 +1494,7 @@ def make_handler(app: MonitorApp):
                 self.send_json({"error": f"保存失败：{exc}"}, 500)
 
         def do_POST(self) -> None:
-            """Handle host tests/additions and explicitly enabled dangerous actions."""
+            """处理连接测试、新增机器和显式开启的危险操作。"""
             if not self.authenticated():
                 return
             path = urllib.parse.urlparse(self.path).path
@@ -1551,7 +1547,7 @@ def make_handler(app: MonitorApp):
                 self.send_json({"error": str(exc)}, 400)
 
         def do_DELETE(self) -> None:
-            """Delete one configured host while preserving the last remaining host."""
+            """删除一台已配置机器，同时保留最后一台机器。"""
             if not self.authenticated():
                 return
             match = re.fullmatch(r"/api/hosts/([^/]+)", urllib.parse.urlparse(self.path).path)
@@ -1572,10 +1568,10 @@ def make_handler(app: MonitorApp):
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse the deliberately small deployment and capability surface."""
+    """解析保持精简的部署参数和能力开关。"""
 
     def delete_depth(value: str) -> int:
-        """Parse and validate the optional `--allow-delete` depth value."""
+        """解析并校验可选的 `--allow-delete` 层级参数。"""
         try:
             depth = int(value)
         except ValueError:
@@ -1601,14 +1597,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Validate exposure rules, start background work, and serve until interrupted."""
+    """校验暴露规则、启动后台任务，并持续服务直到被中断。"""
     args = parse_args()
     if not 1 <= args.port <= 65535:
         raise SystemExit("HTTP 端口必须在 1–65535 之间")
     if bool(args.username) != bool(args.password):
         raise SystemExit("MONITOR_USERNAME 和 MONITOR_PASSWORD 必须同时配置")
-    # Basic Auth is mandatory when the built-in HTTP server leaves loopback.
-    # TLS remains the responsibility of a trusted reverse proxy or private network.
+    # 内置 HTTP 服务监听回环地址以外的接口时必须启用 Basic Auth；
+    # TLS 仍由可信反向代理或私有网络负责。
     if (args.bind not in {"127.0.0.1", "::1", "localhost"}
             and not args.demo and not args.username):
         raise SystemExit("非本机监听必须配置 MONITOR_USERNAME 和 MONITOR_PASSWORD")
