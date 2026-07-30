@@ -95,6 +95,15 @@ try {
   assert(!initial.bold, "表格内容使用常规字重");
   assert(initial.duplicateIds.length === 0, "页面不存在重复 ID");
   assert(await evaluate(`state.refreshInterval === 5`), "前端使用后端返回的共享快照周期");
+  assert(await evaluate(`apiUrl("/api/hosts","http://admin:p%40ss@example.test:8080/")==="http://example.test:8080/api/hosts"`), "内嵌 Basic Auth 登录地址生成 API 请求时移除账号密码");
+  const bootstrapRecovery = await evaluate(`(async()=>{window.__bootstrapBaseFetch=window.fetch;let hostAttempts=0,snapshotAttempts=0;window.fetch=(...args)=>{const url=new URL(String(args[0]),location.href).pathname,method=args[1]?.method||"GET";if(url==="/api/hosts"&&method==="GET"){hostAttempts++;if(hostAttempts===1)return Promise.resolve(new Response(JSON.stringify({error:"模拟网关失败"}),{status:502,headers:{"Content-Type":"application/json"}}))}if(url.includes("/snapshot"))snapshotAttempts++;return window.__bootstrapBaseFetch(...args)};state.hostId=null;state.hosts=[];state.rows=[];state.summary={};await refresh({animate:false,refreshHosts:true});const emptyAfterFailure=!state.hostId;await refreshOnSchedule();const result={emptyAfterFailure,recovered:Boolean(state.hostId&&state.hosts.length&&state.rows.length),hostAttempts,snapshotAttempts};window.fetch=window.__bootstrapBaseFetch;return result})()`);
+  assert(bootstrapRecovery.emptyAfterFailure && bootstrapRecovery.recovered && bootstrapRecovery.hostAttempts === 2 && bootstrapRecovery.snapshotAttempts === 1, "首次机器列表返回 502 后下一轮自动重拉列表并恢复当前机器快照");
+  await evaluate(`window.__resumeBaseFetch=window.fetch;window.__resumeSnapshots=0;window.__resumeStatuses=0;window.fetch=(...args)=>{const url=new URL(String(args[0]),location.href).pathname;if(url.includes("/snapshot"))window.__resumeSnapshots++;if(url==="/api/host-statuses")window.__resumeStatuses++;return window.__resumeBaseFetch(...args)};lastResumeRefresh=0;window.dispatchEvent(new PageTransitionEvent("pageshow",{persisted:true}));document.dispatchEvent(new Event("visibilitychange"))`);
+  await waitFor(`window.__resumeStatuses === 1`, "页面会话恢复刷新");
+  await sleep(100);
+  const resumeRecovery = await evaluate(`({snapshots:window.__resumeSnapshots,statuses:window.__resumeStatuses,rows:document.querySelectorAll("tbody tr").length})`);
+  await evaluate(`window.fetch=window.__resumeBaseFetch`);
+  assert(resumeRecovery.snapshots === 1 && resumeRecovery.statuses === 1 && resumeRecovery.rows > 0, "BFCache 或回到前台时立即刷新且相邻生命周期事件只发一轮请求");
   const statusLine = await evaluate(`({
     oldUpdate: Boolean(document.querySelector("#updated")),
     sample: document.querySelector("#sampleTime")?.textContent,
@@ -122,7 +131,7 @@ try {
   assert(statusLine.summaryHeight <= 30 && !statusLine.summarySeparators && statusLine.compactColumns, "资源摘要无分隔线、纵向紧凑且字段列固定");
   assert(statusLine.endpoint.startsWith("SSH 地址：") && statusLine.loopbackDisplay === statusLine.browserHost && statusLine.tunnelDisplay === "198.51.100.8" && statusLine.normalDisplay === "10.0.0.8" && statusLine.collectionDot && statusLine.collectionLabel === "资源采集成功" && statusLine.tabDots === 4 && statusLine.addressDots === 0, "采集状态点位于采集时间前，地址行只负责本机、SSH 与反向隧道地址");
   assert(await evaluate(`(() => {const host=activeHost(),connectivity=host.connectivity_status,collection=host.collection_status,status=host.status;host.connectivity_status="offline";host.collection_status="normal";host.status="normal";renderTabs();renderSummary();const separate=Boolean(document.querySelector(".machine.active .connectivity-dot.offline")&&document.querySelector("#collectionStatusDot.normal"));host.connectivity_status=connectivity;host.collection_status=collection;host.status=status;renderTabs();renderSummary();return separate})()`), "机器 SSH 连通状态与当前资源采集状态使用两套独立逻辑");
-  const hostStatusRequest = await evaluate(`(async()=>{window.__hostStatusBaseFetch=window.fetch;window.__hostStatusFetches=[];window.fetch=(...args)=>{window.__hostStatusFetches.push(String(args[0]));return window.__hostStatusBaseFetch(...args)};await refreshHostStatuses();const result={health:window.__hostStatusFetches.filter(x=>x==="/api/host-statuses").length,snapshots:window.__hostStatusFetches.filter(x=>x.includes("/snapshot")).length};window.fetch=window.__hostStatusBaseFetch;return result})()`);
+  const hostStatusRequest = await evaluate(`(async()=>{window.__hostStatusBaseFetch=window.fetch;window.__hostStatusFetches=[];window.fetch=(...args)=>{window.__hostStatusFetches.push(new URL(String(args[0]),location.href).pathname);return window.__hostStatusBaseFetch(...args)};await refreshHostStatuses();const result={health:window.__hostStatusFetches.filter(x=>x==="/api/host-statuses").length,snapshots:window.__hostStatusFetches.filter(x=>x.includes("/snapshot")).length};window.fetch=window.__hostStatusBaseFetch;return result})()`);
   assert(hostStatusRequest.health === 1 && hostStatusRequest.snapshots === 0, "浏览器状态轮询只读取轻量缓存接口，不触发 SSH 或资源快照");
   assert(await evaluate(`document.querySelectorAll("#sampleTime .time-colon").length === 2 && getComputedStyle(document.querySelector("#sampleTime .time-colon")).animationName === "clockPulse"`), "采集时间冒号按秒轻微跳动");
   assert(await evaluate(`!document.querySelector("#currentTime, #sampleTime .late, #sampleTime [title]") && getComputedStyle(document.querySelector("#sampleTime")).color!=="rgb(217, 45, 32)"`), "采集时间不使用延迟红字或悬浮提示");
@@ -142,7 +151,7 @@ try {
   await evaluate(`document.querySelector('[data-host="demo-1"]').click()`);
   await waitFor(`document.querySelector('[data-host="demo-1"]').classList.contains("active")`, "切回第一台机器");
   assert(await evaluate(`document.querySelector('[data-view="memory"]').classList.contains("active") && document.querySelectorAll("tbody tr").length>0`), "切回机器立即显示该机器上次缓存并保留资源页签");
-  const refreshStart = await evaluate(`Number(document.documentElement.dataset.refreshCount);window.__summaryLabels=[...document.querySelectorAll("#summary .sum-label")];window.__snapshotFetches=[];window.__snapshotBaseFetch=window.fetch;window.fetch=(...args)=>{window.__snapshotFetches.push(String(args[0]));return window.__snapshotBaseFetch(...args)};refresh({animate:false,refreshHosts:false});Number(document.documentElement.dataset.refreshCount)`);
+  const refreshStart = await evaluate(`Number(document.documentElement.dataset.refreshCount);window.__summaryLabels=[...document.querySelectorAll("#summary .sum-label")];window.__snapshotFetches=[];window.__snapshotBaseFetch=window.fetch;window.fetch=(...args)=>{window.__snapshotFetches.push(new URL(String(args[0]),location.href).pathname);return window.__snapshotBaseFetch(...args)};refresh({animate:false,refreshHosts:false});Number(document.documentElement.dataset.refreshCount)`);
   await waitFor(`Number(document.documentElement.dataset.refreshCount) > ${refreshStart}`, "当前机器缓存刷新");
   const batchRefresh = await evaluate(`({selected:window.__snapshotFetches.filter(url=>url==="/api/hosts/demo-1/snapshot").length,batch:window.__snapshotFetches.filter(url=>url==="/api/snapshots").length,other:window.__snapshotFetches.filter(url=>url.includes("/snapshot")&&url!=="/api/hosts/demo-1/snapshot").length,hosts:window.__snapshotFetches.filter(url=>url==="/api/hosts").length})`);
   await evaluate(`window.fetch=window.__snapshotBaseFetch`);
@@ -207,8 +216,10 @@ try {
   await evaluate(`document.querySelector('[data-view="cpu"]').click()`);
   await waitFor(`document.querySelector('[data-view="cpu"]').classList.contains("active")`, "返回 CPU 页");
   assert(await evaluate(`window.__diskRefreshNote.includes("点击目录时查询") && window.__diskRefreshNote.includes("10 分钟") && document.querySelector("#refreshNote").textContent.includes("每 5 秒")`), "页脚说明随硬盘与进程视图正确切换");
-  const beforeRefresh = await evaluate(`Number(document.documentElement.dataset.refreshCount)`);
-  await waitFor(`Number(document.documentElement.dataset.refreshCount) > ${beforeRefresh}`, "5 秒自动刷新", 8000);
+  const beforeRefresh = await evaluate(`document.documentElement.dataset.lastAnimated="0"; Number(document.documentElement.dataset.refreshCount)`);
+  // 页面恢复时的即时请求可能命中同一份 5 秒快照；静态快照没有变化时
+  // 本来就不应制造动画，因此最多再等一轮，验证真实变化后的更新效果。
+  await waitFor(`Number(document.documentElement.dataset.refreshCount) > ${beforeRefresh} && Number(document.documentElement.dataset.lastAnimated || 0) > 0`, "5 秒自动刷新并展示变化", 13000);
   const refreshed = await evaluate(`({
     values: [...document.querySelectorAll("tbody .metric")].map(x => parseFloat(x.textContent)),
     animated: Number(document.documentElement.dataset.lastAnimated || 0)
@@ -230,7 +241,7 @@ try {
   assert(validation.includes("机器名称"), "新增失败原因在弹窗内持续显示");
   const inputTypes = await evaluate(`({address:document.querySelector("#hostAddress").tagName,user:document.querySelector("#hostUser").tagName})`);
   assert(inputTypes.address === "INPUT" && inputTypes.user === "INPUT", "机器连接字段读取真实输入框");
-  await evaluate(`window.__baseFetch=window.fetch;window.__delayedHostList=false;window.fetch=(...args)=>{const method=args[1]?.method||"GET";if(String(args[0])==="/api/hosts"&&method==="GET"&&!window.__delayedHostList){window.__delayedHostList=true;return window.__baseFetch(...args).then(response=>new Promise(resolve=>setTimeout(()=>resolve(response),2000)))}return window.__baseFetch(...args)};refresh({animate:false,refreshHosts:true})`);
+  await evaluate(`window.__baseFetch=window.fetch;window.__delayedHostList=false;window.fetch=(...args)=>{const method=args[1]?.method||"GET",url=new URL(String(args[0]),location.href).pathname;if(url==="/api/hosts"&&method==="GET"&&!window.__delayedHostList){window.__delayedHostList=true;return window.__baseFetch(...args).then(response=>new Promise(resolve=>setTimeout(()=>resolve(response),2000)))}return window.__baseFetch(...args)};refresh({animate:false,refreshHosts:true})`);
   await sleep(100);
   const addStarted = Date.now();
   await evaluate(`document.querySelector("#hostName").value="11"; document.querySelector("#hostAddress").value="127.0.0.1"; document.querySelector("#hostUser").value="demo-user"; document.querySelector("#hostPort").value="2222"; document.querySelector("#saveHost").click()`);
@@ -238,7 +249,7 @@ try {
   assert(Date.now() - addStarted < 900, "新增机器不等待进行中的旧刷新");
   await evaluate(`window.fetch=window.__baseFetch`);
   assert(await evaluate(`document.querySelectorAll(".machine").length === 5`), "新增后 Tab 数量增加");
-  await evaluate(`window.__deleteBaseFetch=window.fetch;window.__staleDeleteList=false;window.fetch=(...args)=>{const url=String(args[0]),method=args[1]?.method||"GET";if(url==="/api/hosts"&&method==="GET"&&!window.__staleDeleteList){window.__staleDeleteList=true;return window.__deleteBaseFetch(...args).then(response=>new Promise(resolve=>setTimeout(()=>resolve(response),2000)))}if(url.includes("/api/hosts/11")&&method==="DELETE")return new Promise(resolve=>setTimeout(()=>resolve(window.__deleteBaseFetch(...args)),1000));return window.__deleteBaseFetch(...args)};refresh({animate:false,refreshHosts:true})`);
+  await evaluate(`window.__deleteBaseFetch=window.fetch;window.__staleDeleteList=false;window.fetch=(...args)=>{const url=new URL(String(args[0]),location.href).pathname,method=args[1]?.method||"GET";if(url==="/api/hosts"&&method==="GET"&&!window.__staleDeleteList){window.__staleDeleteList=true;return window.__deleteBaseFetch(...args).then(response=>new Promise(resolve=>setTimeout(()=>resolve(response),2000)))}if(url.includes("/api/hosts/11")&&method==="DELETE")return new Promise(resolve=>setTimeout(()=>resolve(window.__deleteBaseFetch(...args)),1000));return window.__deleteBaseFetch(...args)};refresh({animate:false,refreshHosts:true})`);
   await sleep(100);
   const immediateDelete = await evaluate(`document.querySelector(".machine.active .rename").click();document.querySelector("#removeHost").click();document.querySelector("#confirmDelete").click();({tabs:document.querySelectorAll(".machine").length,active:document.querySelector(".machine.active")?.textContent,rows:document.querySelectorAll("tbody tr").length})`);
   assert(immediateDelete.tabs === 4 && !immediateDelete.active.includes("11") && immediateDelete.rows > 0, "删除 active 机器后立即切到缓存机器");
@@ -279,7 +290,7 @@ try {
   assert(!mobile.overflow && mobile.parentInline, "移动端无横向溢出且保留父进程信息");
   assert(mobile.background === "rgb(255, 255, 255)", "页面保持白色背景");
 
-  console.log("Browser E2E: 70/70 checks passed");
+  console.log("Browser E2E: 73/73 checks passed");
 } finally {
   socket.close();
   browser.kill("SIGTERM");

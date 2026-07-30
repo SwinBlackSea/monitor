@@ -160,7 +160,10 @@
     const addressLabel=host=>host?.tunnel_peer?"公网地址":host?.local?"访问地址":isLoopback(host?.address)?"隧道端点":"SSH 地址";
     const activeHost=()=>state.hosts.find(h=>h.id===state.hostId);
     function defaultSort(){state.sortKey="metric";state.sortDir="desc"}
-    async function api(path,options={}){if(standaloneDemo)return demoApi(path,options);const response=await fetch(path,{cache:"no-store",headers:{"Content-Type":"application/json"},...options});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.error||`请求失败（${response.status}）`);return data}
+    // 直接登录地址可能是 http://user:pass@host/。相对 fetch 会继承 URL
+    // 中的凭据并被浏览器拒绝，因此所有 API 地址都显式移除 userinfo。
+    function apiUrl(path,base=location.href){const url=new URL(path,base);url.username="";url.password="";return url.href}
+    async function api(path,options={}){if(standaloneDemo)return demoApi(path,options);const response=await fetch(apiUrl(path),{cache:"no-store",headers:{"Content-Type":"application/json"},...options});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.error||`请求失败（${response.status}）`);return data}
     const connectivityLabels={normal:"SSH 连接正常",warning:"SSH 状态检测中",offline:"SSH 连接异常"},collectionLabels={normal:"资源采集成功",warning:"尚未采集资源",offline:"资源采集失败"};
     function renderTabs(){machines.innerHTML=state.hosts.map(h=>{const status=h.connectivity_status||"warning";return `<button class="machine ${h.id===state.hostId?"active":""}" data-host="${esc(h.id)}" role="tab" aria-selected="${h.id===state.hostId}"><span class="dot ${status} pulse connectivity-dot" role="img" aria-label="${connectivityLabels[status]||connectivityLabels.warning}"></span><span>${esc(h.name)}</span><span class="rename" data-manage="${esc(h.id)}" role="button" aria-label="编辑 ${esc(h.name)}" title="编辑机器">✎</span></button>`}).join("")+`<button class="machine-add" data-add aria-label="添加机器" title="添加机器">＋</button>`}
     function updateConnectivityDots(){for(const host of state.hosts){const dot=machines.querySelector(`[data-host="${CSS.escape(host.id)}"] .connectivity-dot`);if(!dot)continue;const status=host.connectivity_status||"warning";dot.className=`dot ${status} pulse connectivity-dot`;dot.setAttribute("aria-label",connectivityLabels[status]||connectivityLabels.warning)}}
@@ -232,11 +235,18 @@
     hostDialog.onkeydown=event=>{if(event.key==="Enter"&&event.target.tagName==="INPUT"){event.preventDefault();$("#saveHost").click()}};
     function showToast(text){const toast=$("#toast");toast.textContent=text;toast.classList.add("show");clearTimeout(showToast.timer);showToast.timer=setTimeout(()=>toast.classList.remove("show"),2600)}
     setInterval(renderClocks,1000);
-    // Recursive timeout prevents overlapping resource requests when one SSH
-    // collection lasts longer than the configured interval.
-    function scheduleResourceRefresh(){setTimeout(async()=>{if(!document.hidden&&state.view!=="disk")await refresh({animate:true,refreshHosts:false});scheduleResourceRefresh()},state.refreshInterval*1000)}
+    // 首次机器列表请求失败时 hostId 为空，下一轮必须重新拉取机器列表；
+    // 一旦选中机器，后续周期仍然只请求当前机器的共享快照。
+    async function refreshOnSchedule(){const bootstrap=!state.hostId;if(document.hidden||(!bootstrap&&state.view==="disk"))return;await refresh({animate:true,refreshHosts:bootstrap})}
+    // BFCache、会话恢复和从后台回到前台都立即补一次刷新；Promise 与
+    // 500 ms 窗口合并 pageshow/visibilitychange 可能连续触发的事件。
+    let resumeRefreshPromise=null,lastResumeRefresh=Date.now();
+    function refreshAfterResume(){if(document.hidden)return Promise.resolve();if(resumeRefreshPromise)return resumeRefreshPromise;const now=Date.now();if(now-lastResumeRefresh<500)return Promise.resolve();lastResumeRefresh=now;resumeRefreshPromise=(async()=>{await refreshOnSchedule();await refreshHostStatuses()})().finally(()=>resumeRefreshPromise=null);return resumeRefreshPromise}
+    // 递归定时器在一次 SSH 采集超过配置周期时仍不会叠加资源请求。
+    function scheduleResourceRefresh(){setTimeout(async()=>{await refreshOnSchedule();scheduleResourceRefresh()},state.refreshInterval*1000)}
     setInterval(()=>{if(!document.hidden)refreshHostStatuses()},30000);
-    document.addEventListener("visibilitychange",()=>{if(!document.hidden)refreshHostStatuses()});
+    document.addEventListener("visibilitychange",()=>{if(!document.hidden)refreshAfterResume()});
+    window.addEventListener("pageshow",refreshAfterResume);
     refresh({animate:false,refreshHosts:true,reset:true}).then(()=>{refreshHostStatuses();scheduleResourceRefresh()});
   </script>
 </body>
